@@ -124,6 +124,54 @@ RELATIONS:
   ROLE: TestDefinition
   VALUE: tools/testing/selftests/devmem/devmem.c
   FUNCTION: test_function
+- TYPE: File
+  ROLE: TestDefinition
+  VALUE: tools/testing/selftests/devmem/devmem.c
+  CLASS: FooClass
+""".lstrip()
+
+    reader = SDReader()
+
+    document = reader.read(input_sdoc)
+    assert isinstance(document, SDocDocument)
+
+    writer = SDWriter(default_project_config)
+    output = writer.write(document)
+
+    assert input_sdoc == output
+
+
+def test_004_file_relations_element_and_id(default_project_config):
+    input_sdoc = """
+[DOCUMENT]
+TITLE: Test Doc
+
+[GRAMMAR]
+ELEMENTS:
+- TAG: TEXT
+  FIELDS:
+  - TITLE: STATEMENT
+    TYPE: String
+    REQUIRED: True
+- TAG: REQUIREMENT
+  FIELDS:
+  - TITLE: STATEMENT
+    TYPE: String
+    REQUIRED: True
+  RELATIONS:
+  - TYPE: File
+
+[REQUIREMENT]
+STATEMENT: >>>
+This is a statement.
+<<<
+RELATIONS:
+- TYPE: File
+  ROLE: TestDefinition
+  PATH: tools/testing/selftests/devmem/devmem.c
+  ELEMENT: Function
+  ID: test_function
+  HASH: abc123
 """.lstrip()
 
     reader = SDReader()

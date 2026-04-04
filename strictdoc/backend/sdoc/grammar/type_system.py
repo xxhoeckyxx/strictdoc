@@ -48,10 +48,14 @@ FileReference[noskipws]:
 
 FileEntry[noskipws]:
   ('  FORMAT: ' g_file_format = FileEntryFormat '\n')?
-   '  VALUE: ' g_file_path = /.*$/ '\n'
+  ('  VALUE: ' g_deprecated_file_path = /.*$/ '\n')?
+  ('  PATH: ' g_file_path = /.*$/ '\n')?
+  ('  ELEMENT: ' element = /.*$/ '\n')?
+  ('  ID: ' id = /.*$/ '\n')?
   ('  LINE_RANGE: ' g_line_range = /.*$/ '\n')?
   ('  FUNCTION: ' function = /.*$/ '\n')?
   ('  CLASS: ' clazz = /.*$/ '\n')?
+  ('  HASH: ' hash = /.*$/ '\n')?
 ;
 
 FileEntryFormat[noskipws]:
