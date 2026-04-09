@@ -93,6 +93,7 @@ class ProjectConfigDefault:
         ProjectFeature.TRACEABILITY_SCREEN,
         ProjectFeature.DEEP_TRACEABILITY_SCREEN,
         ProjectFeature.SEARCH,
+        ProjectFeature.HTML2PDF,
     ]
     DEFAULT_SERVER_HOST = "127.0.0.1"
     DEFAULT_SERVER_PORT = 5111

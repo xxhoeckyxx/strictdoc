@@ -6,11 +6,13 @@ from collections import defaultdict
 from typing import Dict, List, Optional
 
 from strictdoc.backend.sdoc.models.document import SDocDocument
+from strictdoc.backend.sdoc.models.node import SDocNode
 from strictdoc.backend.sdoc.models.document_config import (
     DocumentCustomMetadata,
     DocumentCustomMetadataKeyValuePair,
 )
 from strictdoc.backend.sdoc.models.inline_link import InlineLink
+from strictdoc.core.document_iterator import SDocDocumentIterator
 from strictdoc.core.traceability_index import (
     TraceabilityIndex,
 )
@@ -19,6 +21,9 @@ from strictdoc.core.transforms.validation_error import (
 )
 from strictdoc.export.html.form_objects.document_config_form_object import (
     DocumentConfigFormObject,
+)
+from strictdoc.export.html.form_objects.requirement_form_object import (
+    UID_ALLOWED_CHARS_RE,
 )
 
 
@@ -96,6 +101,39 @@ class UpdateDocumentConfigTransform:
 
         if len(form_object.document_title) == 0:
             errors["TITLE"].append("Document title must not be empty.")
+
+        # Enforce the same UID character set as for node UIDs and
+        # the SDoc grammar (see TextX pattern '([\w]+[\w()\-\/:. ]*)').
+        if (
+            form_object.document_uid is not None
+            and len(form_object.document_uid) > 0
+            and UID_ALLOWED_CHARS_RE.match(form_object.document_uid) is None
+        ):
+            errors["UID"].append(
+                "UID contains invalid characters. Allowed "
+                "characters are letters, digits, underscore, "
+                "parentheses, '-', '/', '.', ':', and spaces."
+            )
+
+        # Validate UIDs of all nodes in this document as well. This catches
+        # invalid UIDs that might have been introduced earlier (e.g. by
+        # manual edits or older tools) when the user tries to save the
+        # document configuration via the web UI.
+        iterator = SDocDocumentIterator(document)
+        for node, _ in iterator.all_content():
+            if not isinstance(node, SDocNode):
+                continue
+            if node.reserved_uid is None:
+                continue
+            if UID_ALLOWED_CHARS_RE.match(node.reserved_uid) is None:
+                errors["UID"].append(
+                    "UID contains invalid characters. Allowed "
+                    "characters are letters, digits, underscore, "
+                    "parentheses, '-', '/', '.', ':', and spaces."
+                )
+                # One error is enough to prevent saving; no need to
+                # list every single offending node here.
+                break
 
         # Ensure that UID doesn't have any incoming links if it is going to be
         # renamed or removed.
