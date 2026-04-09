@@ -89,17 +89,30 @@
     {% include "components/form/row/row_with_relation.jinja" %}
   {%- endfor -%}
 
-  <div id="requirement_{{ form_object.requirement_mid }}__new_relation"></div>
-  <sdoc-form-row>
-    <a
-      class="action_button"
-      href="/actions/document/new_relation?requirement_mid={{ form_object.requirement_mid }}&document_mid={{ form_object.document_mid }}&context_document_mid={{ form_object.context_document_mid }}&element_type={{ form_object.element_type }}&revision={{ form_object.revision }}"
-      data-turbo-action="replace"
-      data-turbo="true"
-      data-action-type="add_field"
-      data-testid="form-action-add-relation"
-    >{% include "_res/svg_ico16_add.jinja.html" %} Add relation</a>
-  </sdoc-form-row>
+  {# Only allow adding relations if the grammar defines at least one
+     non-File relation type (e.g. Parent/Child). This prevents offering
+     relations on SECTION nodes that have no relations in the grammar
+     and avoids defaulting to a File relation without an explicit type. #}
+  {% set creatable_relations = namespace(has=false) %}
+  {% for relation_type_ in form_object.relation_types %}
+    {% if relation_type_ != "File" %}
+      {% set creatable_relations.has = true %}
+    {% endif %}
+  {% endfor %}
+
+  {% if creatable_relations.has %}
+    <div id="requirement_{{ form_object.requirement_mid }}__new_relation"></div>
+    <sdoc-form-row>
+      <a
+        class="action_button"
+        href="/actions/document/new_relation?requirement_mid={{ form_object.requirement_mid }}&document_mid={{ form_object.document_mid }}&context_document_mid={{ form_object.context_document_mid }}&element_type={{ form_object.element_type }}&revision={{ form_object.revision }}"
+        data-turbo-action="replace"
+        data-turbo="true"
+        data-action-type="add_field"
+        data-testid="form-action-add-relation"
+      >{% include "_res/svg_ico16_add.jinja.html" %} Add relation</a>
+    </sdoc-form-row>
+  {% endif %}
 </sdoc-tab-content>
 
 {# Comments #}

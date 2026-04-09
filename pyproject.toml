@@ -101,6 +101,13 @@ dependencies = [
     "html2pdf4doc == 0.0.31",
     "pypdf >= 6.5.0, == 6.*",
 
+    # Optional HTML2PDF engine based on Playwright/Chromium. The Python
+    # package is installed by default so that enabling the Playwright
+    # engine via the STRICTDOC_HTML2PDF_ENGINE environment variable
+    # works out of the box (a matching browser still needs to be
+    # installed separately via "playwright install").
+    "playwright >= 1.0.0, == 1.*",
+
     # Robot Framework dependencies
     "robotframework >= 4.0.0",
 
