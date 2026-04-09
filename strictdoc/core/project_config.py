@@ -93,6 +93,7 @@ class ProjectConfigDefault:
         ProjectFeature.TRACEABILITY_SCREEN,
         ProjectFeature.DEEP_TRACEABILITY_SCREEN,
         ProjectFeature.SEARCH,
+        ProjectFeature.HTML2PDF,
     ]
     DEFAULT_SERVER_HOST = "127.0.0.1"
     DEFAULT_SERVER_PORT = 5111
@@ -826,11 +827,18 @@ class ProjectConfigLoader:
             return ProjectConfig.default_config()
         if os.path.isdir(path_to_config):
             path_to_config_dir = path_to_config
-            path_to_config = os.path.join(path_to_config_dir, "strictdoc.toml")
-            if not os.path.isfile(path_to_config):
-                path_to_config = os.path.join(
-                    path_to_config_dir, "strictdoc_config.py"
-                )
+            # Prefer the Python config file when both are present.
+            path_to_py_config = os.path.join(
+                path_to_config_dir, "strictdoc_config.py"
+            )
+            path_to_toml_config = os.path.join(
+                path_to_config_dir, "strictdoc.toml"
+            )
+
+            if os.path.isfile(path_to_py_config):
+                path_to_config = path_to_py_config
+            elif os.path.isfile(path_to_toml_config):
+                path_to_config = path_to_toml_config
 
         if not os.path.isfile(path_to_config):
             return ProjectConfig.default_config()
