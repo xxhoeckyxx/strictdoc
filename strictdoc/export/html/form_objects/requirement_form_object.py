@@ -2,11 +2,13 @@
 @relation(SDOC-SRS-55, scope=file)
 """
 
+import re
+
 from collections import defaultdict
 from enum import Enum
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
-from starlette.datastructures import FormData
+from starlette.datastructures import FormData, UploadFile
 
 from strictdoc.backend.sdoc.errors.document_tree_error import DocumentTreeError
 from strictdoc.backend.sdoc.models.document import SDocDocument
@@ -46,6 +48,10 @@ from strictdoc.helpers.form_data import ParsedFormData, parse_form_data
 from strictdoc.helpers.mid import MID
 from strictdoc.helpers.string import sanitize_html_form_field
 from strictdoc.server.error_object import ErrorObject
+
+
+UID_ALLOWED_CHARS_RE = re.compile(r"^[\w]+[\w()\-\/:. ]*$")
+# UID_ALLOWED_CHARS_RE = re.compile(r"^[A-Za-z0-9_]+[A-Za-z0-9_()\-\/:. ]*$")
 
 
 class RequirementFormFieldType(str, Enum):
@@ -183,7 +189,6 @@ class RequirementReferenceFormField:
     def get_type_field_name(self) -> str:
         return f"requirement[relations][{self.field_mid}][typerole]"
 
-
 @auto_described
 class RequirementFormObject(ErrorObject):
     """
@@ -242,10 +247,14 @@ class RequirementFormObject(ErrorObject):
         document: SDocDocument,
         existing_requirement_uid: Optional[str],
     ) -> "RequirementFormObject":
-        request_form_data_as_list = [
-            (field_name, field_value)
-            for field_name, field_value in request_form_data.multi_items()
-        ]
+        # Only forward simple string fields to parse_form_data.
+        request_form_data_as_list: List[Tuple[str, str]] = []
+        for field_name, field_value in request_form_data.multi_items():
+            if isinstance(field_value, UploadFile):
+                # File uploads are not handled by the requirement form parser.
+                continue
+            request_form_data_as_list.append((field_name, field_value))
+
         request_form_dict: ParsedFormData = assert_cast(
             parse_form_data(request_form_data_as_list), dict
         )
@@ -666,6 +675,17 @@ class RequirementFormObject(ErrorObject):
         if "UID" in self.fields:
             new_node_uid = self.fields["UID"][0].field_value
             if len(new_node_uid) > 0:
+                # Enforce the same character set as the SDoc grammar
+                # (see TextX pattern '([\w]+[\w()\-\/:. ]*)')
+                if UID_ALLOWED_CHARS_RE.match(new_node_uid) is None:
+                    self.add_error(
+                        "UID",
+                        (
+                            "UID contains invalid characters. Allowed "
+                            "characters are letters, digits, underscore, "
+                            "parentheses, '-', '/', '.', ':', and spaces."
+                        ),
+                    )
                 new_node_uid_or_none = new_node_uid
 
         if new_node_uid_or_none is not None and (
@@ -799,10 +819,34 @@ class RequirementFormObject(ErrorObject):
                 )
                 return
 
+        # Validate relation types/roles against the grammar for this element.
+        if len(self.reference_fields) > 0:
+            node_grammar_element: GrammarElement = (
+                self.grammar.elements_by_type[self.element_type]
+            )
+            for reference_field in self.reference_fields:
+                field_role_or_none = (
+                    reference_field.field_role
+                    if reference_field.field_role is not None
+                    and len(reference_field.field_role) > 0
+                    else None
+                )
+                if not node_grammar_element.has_relation_type_role(
+                    relation_type=reference_field.field_type,
+                    relation_role=field_role_or_none,
+                ):
+                    reference_field.validation_messages.append(
+                        "Relation type/role is not allowed for this "
+                        "element by the document grammar.",
+                    )
+
         if requirement_uid is not None:
             relation_target_uids_so_far: Set[str] = set()
             for reference_field in self.reference_fields:
-                if reference_field.field_type in ("Parent", "Child"):
+                if reference_field.field_type in (
+                    RequirementReferenceFormField.FieldType.PARENT,
+                    RequirementReferenceFormField.FieldType.CHILD,
+                ):
                     link_uid = reference_field.field_value
                     if len(link_uid) == 0:
                         reference_field.validation_messages.append(
@@ -826,24 +870,22 @@ class RequirementFormObject(ErrorObject):
                         continue
                     relation_target_uids_so_far.add(link_uid)
 
-                    # Check if the target document supports a given relation.
-                    node_grammar_element: GrammarElement = (
-                        self.grammar.elements_by_type[self.element_type]
-                    )
+                    # For parent/child relations, only run cycle detection
+                    # when the grammar actually allows this relation.
+                    node_grammar_element = self.grammar.elements_by_type[
+                        self.element_type
+                    ]
                     field_role_or_none = (
                         reference_field.field_role
                         if reference_field.field_role is not None
                         and len(reference_field.field_role) > 0
                         else None
                     )
-
-                    # This is not a realistic case to happen when a node is
-                    # edited in UI because the UI dropdown element whitelists
-                    # the available relation types.
-                    # Using an assert anyway just to make sure.
-                    assert node_grammar_element.has_relation_type_role(
-                        reference_field.field_type, field_role_or_none
-                    )
+                    if not node_grammar_element.has_relation_type_role(
+                        relation_type=reference_field.field_type,
+                        relation_role=field_role_or_none,
+                    ):
+                        continue
 
                     self._validate_no_cycle_by_new_node(
                         traceability_index, reference_field, requirement_uid
@@ -895,7 +937,8 @@ class RequirementFormObject(ErrorObject):
 
         relations_lambda = (
             parent_lambda
-            if reference_field.field_type == "Parent"
+            if reference_field.field_type
+            == RequirementReferenceFormField.FieldType.PARENT
             else child_lambda
         )
 
