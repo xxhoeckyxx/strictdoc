@@ -99,15 +99,32 @@ class TreeMapGenerator:
         traceability_index: TraceabilityIndex,
         html_templates: HTMLTemplates,
     ) -> None:
-        data = []
+        data: List[Dict[str, Any]] = []
 
-        for document_ in traceability_index.document_tree.document_list:
-            assert document_.meta is not None
-            if traceability_index.file_dependency_manager.must_generate(
-                document_.meta.output_document_full_path
-            ):
-                break
-        else:
+        # The tree map HTML depends on the exported document HTML files. As an
+        # optimization we skip regeneration when all documents are up to date
+        # *and* the tree_map.html file already exists. However, if the output
+        # directory was cleaned manually, tree_map.html may be missing even
+        # though all documents are up-to-date. In that case we must force a
+        # regeneration to avoid 500 errors when the server tries to serve the
+        # missing file.
+
+        output_html = os.path.join(
+            project_config.export_output_html_root,
+            "tree_map.html",
+        )
+
+        needs_generation = not os.path.exists(output_html)
+        if not needs_generation:
+            for document_ in traceability_index.document_tree.document_list:
+                assert document_.meta is not None
+                if traceability_index.file_dependency_manager.must_generate(
+                    document_.meta.output_document_full_path
+                ):
+                    needs_generation = True
+                    break
+
+        if not needs_generation:
             print(  # noqa: T201
                 "All documents are up-to-date. "
                 "Skipping the generation of the tree map screen."
