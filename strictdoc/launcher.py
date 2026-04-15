@@ -183,7 +183,7 @@ class StrictDocLauncher(tk.Tk):
         )
         self.open_browser_btn.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
-        # Log header row between Work and Status: behaves like a collapsible
+        # Log header row after Work and Status: behaves like a collapsible
         # section header (▶ / ▼ Server log).
         log_header_frame = ttk.Frame(main)
         log_header_frame.grid(row=4, column=0, columnspan=3, sticky="we", **PADDING)
@@ -197,9 +197,19 @@ class StrictDocLauncher(tk.Tk):
         self.log_toggle_label.grid(row=0, column=0, padx=5, pady=2, sticky="w")
         self.log_toggle_label.bind("<Button-1>", lambda _event: self._toggle_log())
 
+        # Clear Log button: appears to the right of the log header when the log is expanded.
+        self.clear_log_btn = ttk.Button(
+            log_header_frame,
+            text="Clear Log",
+            command=self._clear_log,
+        )
+        self.clear_log_btn.grid(row=0, column=1, padx=5, pady=2, sticky="w")
+        self.clear_log_btn.grid_remove()  # Initially hidden
+
+
         # Collapsible log area (content). Initially not gridded; it will be
         # placed at row 5 by _toggle_log() when expanded.
-        self.log_frame = ttk.LabelFrame(main, text="Server output")
+        self.log_frame = ttk.Frame(main)
         self.log_text = tk.Text(
             self.log_frame,
             height=10,
@@ -874,6 +884,7 @@ class StrictDocLauncher(tk.Tk):
                 pady=(0, 5),
             )
             self.log_toggle_label.configure(text="▼ Server log")
+            self.clear_log_btn.grid()
 
             # Recompute requested size with log visible and update the
             # minimum window size so the log cannot be clipped.
@@ -891,6 +902,7 @@ class StrictDocLauncher(tk.Tk):
         else:
             self.log_frame.grid_forget()
             self.log_toggle_label.configure(text="▶ Server log")
+            self.clear_log_btn.grid_remove()
 
             # Recompute requested size of the collapsed layout and use
             # it as the new minimum size. Then shrink the window
@@ -1195,6 +1207,12 @@ class StrictDocLauncher(tk.Tk):
         self.log_text.configure(state="normal")
         self.log_text.insert("end", text)
         self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _clear_log(self) -> None:
+        # Clear all text from the log widget
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
 
     # Process monitoring -------------------------------------------------
