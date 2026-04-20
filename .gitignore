@@ -43,6 +43,7 @@ __pycache__
 
 ### webdriver_manager: cache with downloaded Chrome Driver binaries ###
 /strictdoc/export/html2pdf/.wdm
+/strictdoc/sw_logo.png
 
 ### Draw.io
 /developer/drawio/*.drawio.bkp
