@@ -23,6 +23,14 @@ exclude = [
     "/developer",
 ]
 
+# Ensure certain assets are included in distributions even if
+# they are not tracked by VCS or are listed in .gitignore.
+[tool.hatch.build.targets.sdist.force-include]
+"strictdoc/sw_logo.png" = "strictdoc/sw_logo.png"
+
+[tool.hatch.build.targets.wheel.force-include]
+"strictdoc/sw_logo.png" = "strictdoc/sw_logo.png"
+
 [project]
 name = "strictdoc"
 dynamic = ["version"]

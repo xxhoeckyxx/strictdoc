@@ -1,15 +1,22 @@
 import os
 import re
-import subprocess
+import toml
 import sys
 import threading
-import tkinter as tk
 import webbrowser
+import subprocess
+import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from importlib.resources import files
 
-import toml
+STRICTDOC_RES = files("strictdoc")
 
-ICON_PATH = os.path.join(os.path.dirname(__file__), "export", "html", "_static", "favicon.ico")
+LOGO = STRICTDOC_RES / "sw_logo.png"
+ICON = STRICTDOC_RES / "export" / "html" / "_static" / "favicon.ico"
+
+LOGO_PATH = str(LOGO)
+ICON_PATH = str(ICON)
+
 from strictdoc.commands.export import EXPORT_FORMATS
 from strictdoc.helpers.module import import_from_path
 
@@ -18,7 +25,7 @@ class StrictDocLauncher(tk.Tk):
     min_width = 500
     min_height = 230
 
-    def __init__(self) -> None:
+    def __init__(self, initial_workspace: str | None = None) -> None:
         super().__init__()
         self.title("StrictDoc Launcher")
         # Try to set a window icon. On Windows, use the .ico file via
@@ -77,6 +84,24 @@ class StrictDocLauncher(tk.Tk):
 
         self._build_ui()
 
+        # Apply an initial workspace path, if provided (e.g. via CLI).
+        if initial_workspace is not None and str(initial_workspace).strip():
+            workspace_path = os.path.abspath(initial_workspace)
+            self.workspace_dir = workspace_path
+            if hasattr(self, "workspace_var"):
+                self.workspace_var.set(workspace_path)
+
+            # Set default export path to "<workspace>/export".
+            default_export_path = os.path.join(workspace_path, "export")
+            if hasattr(self, "export_path_var"):
+                self.export_path_var.set(default_export_path)
+
+            # Validate and load project metadata; this will also enable
+            # workspace-dependent actions when the directory exists.
+            self._ensure_workspace()
+            self._load_project_title_from_config()
+            self.set_status(f"Workspace set: {workspace_path}")
+
         # After the UI is built, enforce a minimum window size equal
         # to the requested size of the collapsed layout so widgets
         # cannot be clipped by resizing the window too small.
@@ -101,7 +126,22 @@ class StrictDocLauncher(tk.Tk):
             text="StrictDoc Launcher",
             font=("Segoe UI", 11, "bold"),
         )
-        header.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        header.grid(row=0, column=0, columnspan=3, sticky="new", pady=(0, 4))
+
+        # Optional launcher logo in the top-right corner.
+        # Tkinter does not natively support SVG, so we expect a
+        # pre-rendered PNG at LOGO_PATH. If the file is
+        # missing or cannot be loaded, the launcher silently falls
+        # back to a text-only header.
+        self._logo_image = None
+        if os.path.isfile(LOGO_PATH):
+            try:
+                self._logo_image = tk.PhotoImage(file=LOGO_PATH)
+                self._logo_image = self._logo_image.subsample(3)
+                logo_label = ttk.Label(header, image=self._logo_image)
+                logo_label.pack(anchor="e", **PADDING)
+            except Exception:  # noqa: BLE001
+                self._logo_image = None
 
         # Workspace selection
         ttk.Label(main, text="Workspace:").grid(row=1, column=0, sticky="w")
@@ -607,9 +647,6 @@ class StrictDocLauncher(tk.Tk):
                         ),
                     )
                     return
-
-                with open(config_py_path, "w", encoding="utf8") as config_file:
-                    config_file.write(new_text)
 
                 self.set_status(f"Config gespeichert: {config_py_path}")
                 return
@@ -1266,6 +1303,6 @@ class StrictDocLauncher(tk.Tk):
             self.destroy()
 
 
-def main() -> None:
-    app = StrictDocLauncher()
+def main(workspace: str | None = None) -> None:
+    app = StrictDocLauncher(initial_workspace=workspace)
     app.mainloop()
