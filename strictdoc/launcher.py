@@ -40,6 +40,7 @@ class StrictDocLauncher(tk.Tk):
     def __init__(self, initial_workspace: str | None = None) -> None:
         super().__init__()
         self.title("StrictDoc Launcher")
+
         # Try to set a window icon. On Windows, use the .ico file via
         # iconbitmap(); on other platforms fall back to PhotoImage if
         # the format is supported. This is best-effort only.
@@ -58,14 +59,12 @@ class StrictDocLauncher(tk.Tk):
         self.minsize(self.min_width, self.min_height)
 
         # Make the default ttk theme a bit nicer if possible.
-        # This is best-effort only; on some platforms the theme
-        # names differ, so we fall back silently.
         try:
             style = ttk.Style()
             style.configure("green.TButton", foreground="green")
             style.configure("red.TButton", foreground="red")
-            if "calm" in style.theme_names():
-                style.theme_use("calm")
+            # if "clam" in style.theme_names():
+            #     style.theme_use("clam")
         except Exception:  # noqa: BLE001
             pass
 
@@ -73,6 +72,9 @@ class StrictDocLauncher(tk.Tk):
         self.workspace_dir: str | None = None
         self.server_process: subprocess.Popen | None = None
         self._log_thread: threading.Thread | None = None
+
+        # Export state
+        self._export_in_progress = False
 
         # Server connection settings used both for starting the server
         # and for constructing the browser URL.
@@ -143,25 +145,25 @@ class StrictDocLauncher(tk.Tk):
         main.grid(row=0, column=0, sticky="nsew", **PADDING)
 
         # Title / header
-        header = ttk.Label(
-            main,
+        header_frame = ttk.Frame(main)
+        header_frame.grid(row=0, column=0, columnspan=3, sticky="new", pady=(0, 4))
+        header_frame.columnconfigure(0, weight=1)
+
+        title_label = ttk.Label(
+            header_frame,
             text="StrictDoc Launcher",
             font=("Segoe UI", 11, "bold"),
         )
-        header.grid(row=0, column=0, columnspan=3, sticky="new", pady=(0, 4))
+        title_label.grid(row=0, column=0, sticky="w")
 
         # Optional launcher logo in the top-right corner.
-        # Tkinter does not natively support SVG, so we expect a
-        # pre-rendered PNG at LOGO_PATH. If the file is
-        # missing or cannot be loaded, the launcher silently falls
-        # back to a text-only header.
         self._logo_image = None
         if os.path.isfile(LOGO_PATH):
             try:
                 self._logo_image = tk.PhotoImage(file=LOGO_PATH)
                 self._logo_image = self._logo_image.subsample(3)
-                logo_label = ttk.Label(header, image=self._logo_image)
-                logo_label.pack(anchor="e", **PADDING)
+                logo_label = ttk.Label(header_frame, image=self._logo_image)
+                logo_label.grid(row=0, column=1, sticky="e", padx=(8, 0))
             except Exception:  # noqa: BLE001
                 self._logo_image = None
 
@@ -175,58 +177,63 @@ class StrictDocLauncher(tk.Tk):
             width=40,
         )
         self.workspace_entry.grid(row=1, column=1, sticky="we", **PADDING)
-        # Pressing Enter in the workspace field validates and applies the path.
         self.workspace_entry.bind("<Return>", lambda _event: self._on_workspace_enter())
 
         self.workspace_select_btn = ttk.Button(
-            main, 
-            text="Select ...", 
-            command=self.choose_workspace
+            main,
+            text="Select ...",
+            command=self.choose_workspace,
         )
         self.workspace_select_btn.grid(row=1, column=2, sticky="e")
 
-        # Maintanence controls
-        maintanence_frame = ttk.LabelFrame(main, text="Maintenance")
-        maintanence_frame.grid(row=2, column=0, columnspan=3, sticky="we", **PADDING)
+        # Maintenance controls
+        maintenance_frame = ttk.LabelFrame(main, text="Maintenance")
+        maintenance_frame.grid(row=2, column=0, columnspan=3, sticky="we", **PADDING)
 
-        # Project config: open a separate dialog instead of inline editing.
         self.change_config_btn = ttk.Button(
-            maintanence_frame,
+            maintenance_frame,
             text="Change Config ...",
             command=self._open_config_dialog,
         )
         self.change_config_btn.grid(row=0, column=0, sticky="w", **PADDING)
 
         self.export_btn = ttk.Button(
-            maintanence_frame,
+            maintenance_frame,
             text="Export ...",
             command=self._open_export_dialog,
         )
         self.export_btn.grid(row=0, column=1, sticky="w", **PADDING)
 
+        # Export progress indicator
+        self.export_progress = ttk.Progressbar(
+            maintenance_frame,
+            mode="indeterminate",
+            length=120,
+        )
+        self.export_progress.grid(row=0, column=2, sticky="w", **PADDING)
+        self.export_progress.grid_remove()  # initially hidden
+
         # Open Folder button: opens the selected workspace in the system file explorer.
         self.open_folder_btn = ttk.Button(
-            maintanence_frame,
+            maintenance_frame,
             text="Open Folder",
             command=self.open_workspace_in_explorer,
             state="disabled",
         )
-        self.open_folder_btn.grid(row=0, column=2, sticky="e", **PADDING)
+        self.open_folder_btn.grid(row=0, column=3, sticky="e", **PADDING)
 
-        # Repair ID button: runs "strictdoc manage auto-uid" on the workspace
-        # to generate any missing requirement/section IDs.
+        # Repair ID button
         self.repair_id_btn = ttk.Button(
-            maintanence_frame,
+            maintenance_frame,
             text="Repair IDs",
             command=self._repair_ids,
         )
-        self.repair_id_btn.grid(row=0, column=3, sticky="w", **PADDING)
+        self.repair_id_btn.grid(row=0, column=4, sticky="w", **PADDING)
 
         # Server controls
         work_frame = ttk.LabelFrame(main, text="Work")
         work_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", **PADDING)
 
-        # Single toggle button: starts or stops the server depending on state.
         self.server_btn = ttk.Button(
             work_frame,
             text="Start server",
@@ -235,8 +242,6 @@ class StrictDocLauncher(tk.Tk):
         )
         self.server_btn.grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
-        # Open browser button: directly to the right of "Start server".
-        # Enabled only while the server process is running.
         self.open_browser_btn = ttk.Button(
             work_frame,
             text="Open Browser",
@@ -245,8 +250,7 @@ class StrictDocLauncher(tk.Tk):
         )
         self.open_browser_btn.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
-        # Log header row after Work and Status: behaves like a collapsible
-        # section header (▶ / ▼ Server log).
+        # Log header row
         log_header_frame = ttk.Frame(main)
         log_header_frame.grid(row=4, column=0, columnspan=3, sticky="we", **PADDING)
 
@@ -259,18 +263,15 @@ class StrictDocLauncher(tk.Tk):
         self.log_toggle_label.grid(row=0, column=0, padx=5, pady=2, sticky="w")
         self.log_toggle_label.bind("<Button-1>", lambda _event: self._toggle_log())
 
-        # Clear Log button: appears to the right of the log header when the log is expanded.
         self.clear_log_btn = ttk.Button(
             log_header_frame,
             text="Clear Log",
             command=self._clear_log,
         )
         self.clear_log_btn.grid(row=0, column=1, padx=5, pady=2, sticky="w")
-        self.clear_log_btn.grid_remove()  # Initially hidden
+        self.clear_log_btn.grid_remove()
 
-
-        # Collapsible log area (content). Initially not gridded; it will be
-        # placed at row 5 by _toggle_log() when expanded.
+        # Collapsible log area
         self.log_frame = ttk.Frame(main)
         self.log_text = tk.Text(
             self.log_frame,
@@ -286,8 +287,7 @@ class StrictDocLauncher(tk.Tk):
         self.log_frame.columnconfigure(0, weight=1)
         self.log_frame.rowconfigure(0, weight=1)
 
-        # Layout weights: let the log/content area grow vertically so the
-        # status bar stays at the bottom.
+        # Layout weights
         work_frame.columnconfigure(0, weight=0)
         work_frame.columnconfigure(1, weight=0)
         work_frame.columnconfigure(2, weight=1)
@@ -318,7 +318,7 @@ class StrictDocLauncher(tk.Tk):
         version_label = ttk.Label(main, text=version_text, anchor="e")
         version_label.grid(row=7, column=2, sticky="e", padx=(6, 0), pady=(2, 0))
 
-        # Column/row weights: column 1 (middle) grows horizontally.
+        # Column/row weights
         main.columnconfigure(1, weight=1)
 
         # Clean up on close
@@ -338,8 +338,6 @@ class StrictDocLauncher(tk.Tk):
             return "unknown"
 
     def _launcher_settings_path(self) -> str:
-        # Used on Linux/macOS where launcher settings are persisted as a
-        # hidden JSON file in the user's home directory.
         return os.path.join(
             os.path.expanduser("~"),
             self.launcher_settings_filename,
@@ -348,13 +346,13 @@ class StrictDocLauncher(tk.Tk):
     def _load_launcher_settings(self) -> dict[str, object]:
         if sys.platform == "win32" and winreg is not None:
             try:
-                with winreg.OpenKey(  # type: ignore[union-attr]
-                    winreg.HKEY_CURRENT_USER,  # type: ignore[union-attr]
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
                     self.launcher_registry_key,
                     0,
-                    winreg.KEY_READ,  # type: ignore[union-attr]
+                    winreg.KEY_READ,
                 ) as key:
-                    raw_value, _reg_type = winreg.QueryValueEx(  # type: ignore[union-attr]
+                    raw_value, _reg_type = winreg.QueryValueEx(
                         key, self.launcher_registry_value
                     )
                     if isinstance(raw_value, str):
@@ -381,15 +379,15 @@ class StrictDocLauncher(tk.Tk):
         if sys.platform == "win32" and winreg is not None:
             try:
                 payload = json.dumps(settings)
-                with winreg.CreateKey(  # type: ignore[union-attr]
-                    winreg.HKEY_CURRENT_USER,  # type: ignore[union-attr]
+                with winreg.CreateKey(
+                    winreg.HKEY_CURRENT_USER,
                     self.launcher_registry_key,
                 ) as key:
-                    winreg.SetValueEx(  # type: ignore[union-attr]
+                    winreg.SetValueEx(
                         key,
                         self.launcher_registry_value,
                         0,
-                        winreg.REG_SZ,  # type: ignore[union-attr]
+                        winreg.REG_SZ,
                         payload,
                     )
             except Exception:  # noqa: BLE001
@@ -421,8 +419,53 @@ class StrictDocLauncher(tk.Tk):
         settings["launcher"] = launcher_section
         self._save_launcher_settings(settings)
 
+    def _busy_cursor_name(self) -> str:
+        if sys.platform == "win32":
+            return "wait"
+        return "watch"
+
+    def _start_export_progress(self) -> None:
+        """Show and start the indeterminate export progress bar."""
+        self._export_in_progress = True
+
+        self.export_btn.configure(state="disabled", text="Export läuft...")
+        self.export_progress.grid()
+        self.export_progress.start(12)
+
+        # Disable controls that should not be changed during export.
+        self.workspace_entry.configure(state="disabled")
+        self.workspace_select_btn.configure(state="disabled")
+        self.change_config_btn.configure(state="disabled")
+        self.open_folder_btn.configure(state="disabled")
+        self.repair_id_btn.configure(state="disabled")
+        self.server_btn.configure(state="disabled")
+        self.open_browser_btn.configure(state="disabled")
+
+        try:
+            self.configure(cursor=self._busy_cursor_name())
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _stop_export_progress(self) -> None:
+        """Stop and hide the export progress bar."""
+        self._export_in_progress = False
+
+        self.export_progress.stop()
+        self.export_progress.grid_remove()
+
+        try:
+            self.configure(cursor="")
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Restore UI depending on server state.
+        if self._is_server_running():
+            self._set_server_running_ui()
+        else:
+            self._set_server_stopped_ui()
+
     def choose_workspace(self) -> None:
-        """Open a directory selection dialog to choose the StrictDoc workspace."""        
+        """Open a directory selection dialog to choose the StrictDoc workspace."""
         directory = filedialog.askdirectory(title="Select StrictDoc workspace")
         if not directory:
             return
@@ -430,49 +473,28 @@ class StrictDocLauncher(tk.Tk):
         self.workspace_dir = directory
         self.workspace_var.set(directory)
 
-        # Set default export path to "<workspace>/export".
         default_export_path = os.path.join(directory, "export")
         self.export_path_var.set(default_export_path)
 
-        # Validate the selected workspace and enable dependent controls
-        # (including the "Open Folder" button) just like when the path
-        # is entered manually and confirmed with Enter.
         self._ensure_workspace()
-
         self._load_project_title_from_config()
         self.set_status(f"Workspace set: {directory}")
 
     def _on_workspace_enter(self) -> None:
-        """Handle Enter key in the workspace field.
-
-        Validates the entered path and, if valid, applies the same
-        side effects as choosing a workspace via the dialog:
-        - update self.workspace_dir
-        - set default export path to "<workspace>/export"
-        - reload project title suggestion
-        - update status bar
-        """
-
+        """Handle Enter key in the workspace field."""
         if not self._ensure_workspace():
             return
 
         assert self.workspace_dir is not None
         directory = self.workspace_dir
 
-        # Keep behavior consistent with choose_workspace().
         default_export_path = os.path.join(directory, "export")
         self.export_path_var.set(default_export_path)
         self._load_project_title_from_config()
         self.set_status(f"Workspace set: {directory}")
 
     def _ensure_workspace(self) -> bool:
-        """Validate and synchronize the workspace path from the entry field.
-
-        This method ensures that manual text input in the Workspace field is
-        taken into account and that the path actually exists.
-        """
-
-        # Prefer the value from the entry field, if present.
+        """Validate and synchronize the workspace path from the entry field."""
         workspace_from_entry = getattr(self, "workspace_var", None)
         if workspace_from_entry is not None:
             value = workspace_from_entry.get().strip()
@@ -491,18 +513,15 @@ class StrictDocLauncher(tk.Tk):
             )
             return False
 
-        # Normalize and persist the workspace path for subsequent launcher runs.
         self.workspace_dir = os.path.abspath(self.workspace_dir)
         if hasattr(self, "workspace_var"):
             self.workspace_var.set(self.workspace_dir)
         self._save_last_workspace(self.workspace_dir)
 
-        # At this point the workspace path is valid: enable helper actions
-        # that operate on the workspace directory.
         if hasattr(self, "open_folder_btn"):
             self.open_folder_btn.configure(state="normal")
         return True
-    
+
     def open_workspace_in_explorer(self) -> None:
         if not self._ensure_workspace():
             return
@@ -529,14 +548,11 @@ class StrictDocLauncher(tk.Tk):
         2. strictdoc.toml ([project].title)
         3. Workspace folder name as fallback suggestion
         """
-
         self.project_title_var.set("")
         if not self.workspace_dir:
             return
 
-        workspace_dir_value = self.workspace_dir
-        assert workspace_dir_value is not None
-        workspace_dir = os.path.abspath(workspace_dir_value)
+        workspace_dir = os.path.abspath(self.workspace_dir)
         config_py_path = os.path.join(workspace_dir, "strictdoc_config.py")
         config_toml_path = os.path.join(workspace_dir, "strictdoc.toml")
 
@@ -552,7 +568,6 @@ class StrictDocLauncher(tk.Tk):
                         self.project_title_var.set(title_value)
                         return
             except Exception:  # noqa: BLE001
-                # On any error, leave the field empty and fall back to TOML/other options.
                 pass
 
         # 2) TOML config (legacy)
