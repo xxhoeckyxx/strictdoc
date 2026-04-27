@@ -12,6 +12,7 @@ from jinja2 import (
     ModuleLoader,
     StrictUndefined,
     Template,
+    TemplateNotFound,
 )
 from markupsafe import Markup
 
@@ -92,7 +93,11 @@ class CompiledHTMLTemplates(HTMLTemplates):
 
     def compile_jinja_templates(self) -> None:
         if os.path.isdir(self.path_to_jinja_cache_bucket_dir):
-            return
+            if self._is_compiled_cache_healthy():
+                return
+            self._jinja_environment = None
+            shutil.rmtree(self.path_to_jinja_cache_bucket_dir)
+
         jinja_environment = Environment(
             loader=FileSystemLoader(environment.get_path_to_html_templates()),
             undefined=StrictUndefined,
@@ -121,6 +126,19 @@ class CompiledHTMLTemplates(HTMLTemplates):
                 ignore_errors=False,
             )
 
+    def _is_compiled_cache_healthy(self) -> bool:
+        try:
+            checker = Environment(
+                loader=ModuleLoader(self.path_to_jinja_cache_bucket_dir),
+                undefined=StrictUndefined,
+                extensions=[AssertExtension],
+                autoescape=True,
+            )
+            checker.get_template("screens/project_index/index.jinja")
+            return True
+        except TemplateNotFound:
+            return False
+
     def jinja_environment(self) -> JinjaEnvironment:
         if self._jinja_environment is not None:
             return self._jinja_environment
@@ -147,6 +165,11 @@ class CompiledHTMLTemplates(HTMLTemplates):
                     recursive=True,
                 )
             )
+
+            if len(jinja_cache_files) == 0:
+                self._jinja_environment = None
+                shutil.rmtree(self.path_to_jinja_cache_bucket_dir)
+                return
 
             jinja_cache_mtime = get_file_modification_time(jinja_cache_files[0])
 
