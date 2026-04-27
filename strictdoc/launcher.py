@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import toml
 import sys
 import threading
@@ -20,10 +21,21 @@ ICON_PATH = str(ICON)
 from strictdoc.commands.export import EXPORT_FORMATS
 from strictdoc.helpers.module import import_from_path
 
+if sys.platform == "win32":
+    try:
+        import winreg
+    except Exception:  # noqa: BLE001
+        winreg = None
+else:
+    winreg = None
+
 
 class StrictDocLauncher(tk.Tk):
     min_width = 500
     min_height = 230
+    launcher_settings_filename = ".strictdoc_launcher.json"
+    launcher_registry_key = r"Software\StrictDoc\Launcher"
+    launcher_registry_value = "settings_json"
 
     def __init__(self, initial_workspace: str | None = None) -> None:
         super().__init__()
@@ -84,23 +96,33 @@ class StrictDocLauncher(tk.Tk):
 
         self._build_ui()
 
-        # Apply an initial workspace path, if provided (e.g. via CLI).
-        if initial_workspace is not None and str(initial_workspace).strip():
-            workspace_path = os.path.abspath(initial_workspace)
-            self.workspace_dir = workspace_path
-            if hasattr(self, "workspace_var"):
-                self.workspace_var.set(workspace_path)
+        # Resolve workspace preference: explicit CLI argument wins over
+        # persisted launcher preference from the previous run.
+        remembered_workspace = self._load_last_workspace()
+        preferred_workspace = (
+            initial_workspace
+            if initial_workspace is not None and str(initial_workspace).strip()
+            else remembered_workspace
+        )
 
-            # Set default export path to "<workspace>/export".
-            default_export_path = os.path.join(workspace_path, "export")
-            if hasattr(self, "export_path_var"):
-                self.export_path_var.set(default_export_path)
+        # Apply an initial/remembered workspace path, if available.
+        if preferred_workspace is not None and str(preferred_workspace).strip():
+            workspace_path = os.path.abspath(preferred_workspace)
+            if os.path.isdir(workspace_path):
+                self.workspace_dir = workspace_path
+                if hasattr(self, "workspace_var"):
+                    self.workspace_var.set(workspace_path)
 
-            # Validate and load project metadata; this will also enable
-            # workspace-dependent actions when the directory exists.
-            self._ensure_workspace()
-            self._load_project_title_from_config()
-            self.set_status(f"Workspace set: {workspace_path}")
+                # Set default export path to "<workspace>/export".
+                default_export_path = os.path.join(workspace_path, "export")
+                if hasattr(self, "export_path_var"):
+                    self.export_path_var.set(default_export_path)
+
+                # Validate and load project metadata; this will also enable
+                # workspace-dependent actions when the directory exists.
+                self._ensure_workspace()
+                self._load_project_title_from_config()
+                self.set_status(f"Workspace set: {workspace_path}")
 
         # After the UI is built, enforce a minimum window size equal
         # to the requested size of the collapsed layout so widgets
@@ -315,6 +337,90 @@ class StrictDocLauncher(tk.Tk):
         except Exception:
             return "unknown"
 
+    def _launcher_settings_path(self) -> str:
+        # Used on Linux/macOS where launcher settings are persisted as a
+        # hidden JSON file in the user's home directory.
+        return os.path.join(
+            os.path.expanduser("~"),
+            self.launcher_settings_filename,
+        )
+
+    def _load_launcher_settings(self) -> dict[str, object]:
+        if sys.platform == "win32" and winreg is not None:
+            try:
+                with winreg.OpenKey(  # type: ignore[union-attr]
+                    winreg.HKEY_CURRENT_USER,  # type: ignore[union-attr]
+                    self.launcher_registry_key,
+                    0,
+                    winreg.KEY_READ,  # type: ignore[union-attr]
+                ) as key:
+                    raw_value, _reg_type = winreg.QueryValueEx(  # type: ignore[union-attr]
+                        key, self.launcher_registry_value
+                    )
+                    if isinstance(raw_value, str):
+                        loaded = json.loads(raw_value)
+                        if isinstance(loaded, dict):
+                            return loaded
+            except Exception:  # noqa: BLE001
+                return {}
+            return {}
+
+        settings_path = self._launcher_settings_path()
+        if not os.path.isfile(settings_path):
+            return {}
+        try:
+            with open(settings_path, "r", encoding="utf8") as settings_file:
+                loaded = json.load(settings_file)
+            if isinstance(loaded, dict):
+                return loaded
+        except Exception:  # noqa: BLE001
+            return {}
+        return {}
+
+    def _save_launcher_settings(self, settings: dict[str, object]) -> None:
+        if sys.platform == "win32" and winreg is not None:
+            try:
+                payload = json.dumps(settings)
+                with winreg.CreateKey(  # type: ignore[union-attr]
+                    winreg.HKEY_CURRENT_USER,  # type: ignore[union-attr]
+                    self.launcher_registry_key,
+                ) as key:
+                    winreg.SetValueEx(  # type: ignore[union-attr]
+                        key,
+                        self.launcher_registry_value,
+                        0,
+                        winreg.REG_SZ,  # type: ignore[union-attr]
+                        payload,
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+        try:
+            settings_path = self._launcher_settings_path()
+            with open(settings_path, "w", encoding="utf8") as settings_file:
+                json.dump(settings, settings_file, ensure_ascii=False, indent=2)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _load_last_workspace(self) -> str | None:
+        settings = self._load_launcher_settings()
+        launcher_section = settings.get("launcher", {})
+        if isinstance(launcher_section, dict):
+            value = launcher_section.get("last_workspace")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def _save_last_workspace(self, workspace_path: str) -> None:
+        settings = self._load_launcher_settings()
+        launcher_section = settings.get("launcher", {})
+        if not isinstance(launcher_section, dict):
+            launcher_section = {}
+        launcher_section["last_workspace"] = workspace_path
+        settings["launcher"] = launcher_section
+        self._save_launcher_settings(settings)
+
     def choose_workspace(self) -> None:
         """Open a directory selection dialog to choose the StrictDoc workspace."""        
         directory = filedialog.askdirectory(title="Select StrictDoc workspace")
@@ -384,6 +490,13 @@ class StrictDocLauncher(tk.Tk):
                 f"Directory does not exist: {self.workspace_dir}",
             )
             return False
+
+        # Normalize and persist the workspace path for subsequent launcher runs.
+        self.workspace_dir = os.path.abspath(self.workspace_dir)
+        if hasattr(self, "workspace_var"):
+            self.workspace_var.set(self.workspace_dir)
+        self._save_last_workspace(self.workspace_dir)
+
         # At this point the workspace path is valid: enable helper actions
         # that operate on the workspace directory.
         if hasattr(self, "open_folder_btn"):
@@ -393,6 +506,7 @@ class StrictDocLauncher(tk.Tk):
     def open_workspace_in_explorer(self) -> None:
         if not self._ensure_workspace():
             return
+        assert self.workspace_dir is not None
         path = os.path.abspath(self.workspace_dir)
         try:
             if sys.platform == "win32":
