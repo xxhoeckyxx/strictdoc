@@ -9,6 +9,7 @@ import subprocess
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from importlib.resources import files
+from typing import Any
 
 STRICTDOC_RES = files("strictdoc")
 
@@ -58,7 +59,6 @@ class StrictDocLauncher(tk.Tk):
         self.resizable(True, True)
         self.minsize(self.min_width, self.min_height)
 
-        # Make the default ttk theme a bit nicer if possible.
         try:
             style = ttk.Style()
             style.configure("green.TButton", foreground="green")
@@ -136,58 +136,54 @@ class StrictDocLauncher(tk.Tk):
 
     # UI -----------------------------------------------------------------
     def _build_ui(self) -> None:
-        PADDING = {"padx": 5, "pady": 5}
+        PADDING: dict[str, Any] = {"padx": 5, "pady": 5}
 
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        # Konfiguration des Haupt-Grids
+        self.columnconfigure(0, weight=0) # Label Spalte (fest)
+        self.columnconfigure(1, weight=1) # Entry Spalte (flexibel)
+        self.columnconfigure(2, weight=0) # Button Spalte (fest)
 
         main = ttk.Frame(self)
         main.grid(row=0, column=0, sticky="nsew", **PADDING)
 
         # Title / header
-        header_frame = ttk.Frame(main)
-        header_frame.grid(row=0, column=0, columnspan=3, sticky="new", pady=(0, 4))
+        header_frame = ttk.Frame(self)
+        header_frame.grid(row=0, column=0, columnspan=3, sticky="we", **PADDING)
         header_frame.columnconfigure(0, weight=1)
 
-        title_label = ttk.Label(
-            header_frame,
-            text="StrictDoc Launcher",
-            font=("Segoe UI", 11, "bold"),
+        header = ttk.Label(
+            header_frame, 
+            text="StrictDoc Launcher", 
+            font=("Segoe UI", 11, "bold")
         )
-        title_label.grid(row=0, column=0, sticky="w")
+        header.grid(row=0, column=0, sticky="w")
 
-        # Optional launcher logo in the top-right corner.
+        # Logo (rechts)
         self._logo_image = None
         if os.path.isfile(LOGO_PATH):
             try:
                 self._logo_image = tk.PhotoImage(file=LOGO_PATH)
                 self._logo_image = self._logo_image.subsample(3)
-                logo_label = ttk.Label(header_frame, image=self._logo_image)
-                logo_label.grid(row=0, column=1, sticky="e", padx=(8, 0))
-            except Exception:  # noqa: BLE001
+                logo_label = ttk.Label(self, image=self._logo_image)
+                logo_label.grid(row=0, column=1, columnspan=2, sticky="e", **PADDING)
+            except Exception:
                 self._logo_image = None
 
         # Workspace selection
-        ttk.Label(main, text="Workspace:").grid(row=1, column=0, sticky="w")
+        ttk.Label(self, text="Workspace:").grid(row=1, column=0, sticky="w", **PADDING)
 
         self.workspace_var = tk.StringVar()
-        self.workspace_entry = ttk.Entry(
-            main,
-            textvariable=self.workspace_var,
-            width=40,
-        )
+        self.workspace_entry = ttk.Entry(self, width=50, textvariable=self.workspace_var)
+
         self.workspace_entry.grid(row=1, column=1, sticky="we", **PADDING)
+        # Pressing Enter in the workspace field validates and applies the path.
         self.workspace_entry.bind("<Return>", lambda _event: self._on_workspace_enter())
 
-        self.workspace_select_btn = ttk.Button(
-            main,
-            text="Select ...",
-            command=self.choose_workspace,
-        )
-        self.workspace_select_btn.grid(row=1, column=2, sticky="e")
+        self.workspace_select_btn = ttk.Button(self, text="Select ...", command=self.choose_workspace)
+        self.workspace_select_btn.grid(row=1, column=2, sticky="we", **PADDING)
 
         # Maintenance controls
-        maintenance_frame = ttk.LabelFrame(main, text="Maintenance")
+        maintenance_frame = ttk.LabelFrame(self, text="Maintenance")
         maintenance_frame.grid(row=2, column=0, columnspan=3, sticky="we", **PADDING)
 
         self.change_config_btn = ttk.Button(
@@ -203,15 +199,6 @@ class StrictDocLauncher(tk.Tk):
             command=self._open_export_dialog,
         )
         self.export_btn.grid(row=0, column=1, sticky="w", **PADDING)
-
-        # Export progress indicator
-        self.export_progress = ttk.Progressbar(
-            maintenance_frame,
-            mode="indeterminate",
-            length=120,
-        )
-        self.export_progress.grid(row=0, column=2, sticky="w", **PADDING)
-        self.export_progress.grid_remove()  # initially hidden
 
         # Open Folder button: opens the selected workspace in the system file explorer.
         self.open_folder_btn = ttk.Button(
@@ -231,7 +218,7 @@ class StrictDocLauncher(tk.Tk):
         self.repair_id_btn.grid(row=0, column=4, sticky="w", **PADDING)
 
         # Server controls
-        work_frame = ttk.LabelFrame(main, text="Work")
+        work_frame = ttk.LabelFrame(self, text="Work")
         work_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", **PADDING)
 
         self.server_btn = ttk.Button(
@@ -251,7 +238,7 @@ class StrictDocLauncher(tk.Tk):
         self.open_browser_btn.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
         # Log header row
-        log_header_frame = ttk.Frame(main)
+        log_header_frame = ttk.Frame(self)
         log_header_frame.grid(row=4, column=0, columnspan=3, sticky="we", **PADDING)
 
         self._log_expanded = False
@@ -272,7 +259,7 @@ class StrictDocLauncher(tk.Tk):
         self.clear_log_btn.grid_remove()
 
         # Collapsible log area
-        self.log_frame = ttk.Frame(main)
+        self.log_frame = ttk.Frame(self)
         self.log_text = tk.Text(
             self.log_frame,
             height=10,
@@ -286,21 +273,20 @@ class StrictDocLauncher(tk.Tk):
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_frame.columnconfigure(0, weight=1)
         self.log_frame.rowconfigure(0, weight=1)
-
         # Layout weights
         work_frame.columnconfigure(0, weight=0)
         work_frame.columnconfigure(1, weight=0)
         work_frame.columnconfigure(2, weight=1)
-        main.rowconfigure(5, weight=1)
+        self.rowconfigure(5, weight=1)
 
         # Status bar
-        ttk.Separator(main, orient="horizontal").grid(
+        ttk.Separator(self, orient="horizontal").grid(
             row=6, column=0, columnspan=3, sticky="we"
         )
-        ttk.Label(main, text="Status:").grid(row=7, column=0, sticky="w")
+        ttk.Label(self, text="Status:").grid(row=7, column=0, sticky="w")
         self.status_var = tk.StringVar(value="Ready.")
         status_label = ttk.Label(
-            main,
+            self,
             textvariable=self.status_var,
             relief="sunken",
             borderwidth=1,
@@ -310,16 +296,12 @@ class StrictDocLauncher(tk.Tk):
             row=7,
             column=1,
             sticky="we",
-            padx=0,
-            pady=(2, 0),
+            **PADDING
         )
 
         version_text = f"StrictDoc {self._get_strictdoc_version()}"
-        version_label = ttk.Label(main, text=version_text, anchor="e")
-        version_label.grid(row=7, column=2, sticky="e", padx=(6, 0), pady=(2, 0))
-
-        # Column/row weights
-        main.columnconfigure(1, weight=1)
+        version_label = ttk.Label(self, text=version_text, anchor="e")
+        version_label.grid(row=7, column=2, sticky="e", **PADDING)
 
         # Clean up on close
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -429,8 +411,6 @@ class StrictDocLauncher(tk.Tk):
         self._export_in_progress = True
 
         self.export_btn.configure(state="disabled", text="Export läuft...")
-        self.export_progress.grid()
-        self.export_progress.start(12)
 
         # Disable controls that should not be changed during export.
         self.workspace_entry.configure(state="disabled")
@@ -449,9 +429,6 @@ class StrictDocLauncher(tk.Tk):
     def _stop_export_progress(self) -> None:
         """Stop and hide the export progress bar."""
         self._export_in_progress = False
-
-        self.export_progress.stop()
-        self.export_progress.grid_remove()
 
         try:
             self.configure(cursor="")
@@ -589,6 +566,39 @@ class StrictDocLauncher(tk.Tk):
             if folder_name:
                 self.project_title_var.set(folder_name)
 
+    def _run_export_thread(self, output_dir, export_format, on_success, on_error):
+        cmd = [
+            self._python_executable(),
+            "-m",
+            "strictdoc.cli.main",
+            "export",
+            self.workspace_dir,
+            f"--formats={export_format}",
+            "--output-dir",
+            output_dir,
+        ]
+
+        def worker():
+            try:
+                completed = subprocess.run(
+                    cmd,
+                    cwd=self.workspace_dir,
+                    capture_output=True,
+                    text=True,
+                )
+
+                if completed.returncode == 0:
+                    self.after(0, on_success)
+                else:
+                    error_text = completed.stderr or completed.stdout or ""
+                    msg = f"RC={completed.returncode}\n\n{error_text}"
+                    self.after(0, lambda: on_error(msg))
+
+            except Exception as exc:
+                self.after(0, lambda: on_error(str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _open_export_dialog(self) -> None:
         """Open a dialog to select export format and target directory."""
 
@@ -605,7 +615,7 @@ class StrictDocLauncher(tk.Tk):
         dialog.transient(self)
         dialog.grab_set()
 
-        padding = {"padx": 12, "pady": 6}
+        padding: dict[str, Any] = {"padx": 12, "pady": 6}
 
         frame = ttk.LabelFrame(dialog, text="Export")
         frame.grid(row=0, column=0, sticky="nsew", **padding)
@@ -638,26 +648,75 @@ class StrictDocLauncher(tk.Tk):
 
         frame.columnconfigure(1, weight=1)
 
+        # ProgressBar  -------------------------------------------------
+        progress = ttk.Progressbar(frame, mode="indeterminate", length=220)
+        progress.grid(row=2, column=0, columnspan=3, pady=(10, 0))
+        progress.grid_remove()
+
+        # Status Label -------------------------------------------------
+        status_var = tk.StringVar(value="Ready.")
+        status_label = ttk.Label(frame, textvariable=status_var)
+        status_label.grid(row=3, column=0, columnspan=3, sticky="w", pady=(5, 0))
+
+        frame.columnconfigure(1, weight=1)
+
         # Action buttons -----------------------------------------------
         button_frame = ttk.Frame(dialog)
         button_frame.grid(row=1, column=0, sticky="e", **padding)
 
-        def on_export() -> None:
-            dialog.destroy()
-            self.export_function()
+        cancel_btn = ttk.Button(button_frame, text="Cancel", command=dialog.destroy)
+        export_btn = ttk.Button(button_frame, text="Export")
 
-        def on_cancel() -> None:
-            dialog.destroy()
-
-        cancel_btn = ttk.Button(button_frame, text="Cancel", command=on_cancel)
-        export_btn = ttk.Button(button_frame, text="Export", command=on_export)
         cancel_btn.grid(row=0, column=0, padx=(0, 8))
         export_btn.grid(row=0, column=1)
 
-        path_entry.focus_set()
+        # Export-Logik im Dialog
+        def start_export():
+            if self._export_in_progress:
+                return
+            self._export_in_progress = True
 
-        dialog.bind("<Return>", lambda _event: on_export())
-        dialog.bind("<Escape>", lambda _event: on_cancel())
+            output_dir = self.export_path_var.get().strip()
+            if not output_dir and self.workspace_dir:
+                output_dir = os.path.join(self.workspace_dir, "export")
+                self.export_path_var.set(output_dir)
+
+            progress.grid()
+            progress.start(10)
+
+            export_btn.configure(state="disabled")
+            cancel_btn.configure(state="disabled")
+
+            status_var.set("Export running...")
+
+            def on_export_success() -> None:
+                self._export_in_progress = False
+                progress.stop()
+                progress.grid_remove()
+                status_var.set("Export finished.")
+                messagebox.showinfo("Export", f"Export completed in:\n{output_dir}")
+                dialog.destroy()
+
+            def on_export_error(msg: str) -> None:
+                self._export_in_progress = False
+                progress.stop()
+                progress.grid_remove()
+                export_btn.configure(state="normal")
+                cancel_btn.configure(state="normal")
+                status_var.set("Export failed.")
+                messagebox.showerror("Export failed", msg)
+
+            self._run_export_thread(
+                output_dir=output_dir,
+                export_format=self.export_format_var.get(),
+                on_success=on_export_success,
+                on_error=on_export_error,
+            )
+
+        export_btn.configure(command=start_export)
+
+        dialog.bind("<Return>", lambda _e: start_export())
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
 
     def _open_config_dialog(self) -> None:
         """Open a dialog window to edit basic project configuration.
@@ -678,7 +737,7 @@ class StrictDocLauncher(tk.Tk):
         dialog.transient(self)
         dialog.grab_set()
 
-        padding = {"padx": 12, "pady": 6}
+        padding: dict[str, Any] = {"padx": 12, "pady": 6}
 
         ttk.Label(dialog, text="Project title:").grid(
             row=0, column=0, sticky="w", **padding
@@ -776,6 +835,9 @@ class StrictDocLauncher(tk.Tk):
                         ),
                     )
                     return
+
+                with open(config_py_path, "w", encoding="utf8") as config_file:
+                    config_file.write(new_text)
 
                 self.set_status(f"Config gespeichert: {config_py_path}")
                 return
@@ -1200,6 +1262,9 @@ class StrictDocLauncher(tk.Tk):
     def export_function(self) -> None:
         if not self._ensure_workspace():
             return
+        
+        if self._export_in_progress:
+            return
 
         # Resolve target directory. If the field is empty (e.g. user
         # hasn't changed anything and workspace was set before), fall
@@ -1223,6 +1288,9 @@ class StrictDocLauncher(tk.Tk):
             output_dir,
         ]
 
+        # UI sperren + Progress starten
+        self._start_export_progress()
+
         # Log export start
         self._append_log(
             f"[EXPORT] format={export_format} target={output_dir}\n"
@@ -1241,8 +1309,10 @@ class StrictDocLauncher(tk.Tk):
                     self.after(0, lambda: self._export_ok(output_dir))
                 else:
                     self.after(0, lambda: self._export_failed(completed))
+                self.after(0, self._stop_export_progress)
             except Exception as exc:  # noqa: BLE001
                 self.after(0, lambda: self._export_exception(exc))
+                self.after(0, self._stop_export_progress)
 
         threading.Thread(target=run_export, daemon=True).start()
 
@@ -1276,7 +1346,7 @@ class StrictDocLauncher(tk.Tk):
         self._append_log(f"[EXPORT ERROR] {exc}\n")
         messagebox.showerror("Export error", str(exc))
 
-        # Server -------------------------------------------------------------
+    # Server -------------------------------------------------------------
     def start_server(self) -> None:
         if not self._ensure_workspace():
             return
@@ -1338,13 +1408,19 @@ class StrictDocLauncher(tk.Tk):
             self.set_status("Server is not running.")
             return
 
+        process = self.server_process
+        if process is None:
+            self._set_server_stopped_ui()
+            self.set_status("Server is not running.")
+            return
+
         try:
-            self.server_process.terminate()
-            self.server_process.wait(timeout=5)
+            process.terminate()
+            process.wait(timeout=5)
             self.set_status("Server stopped.")
         except Exception:  # noqa: BLE001
             try:
-                self.server_process.kill()
+                process.kill()
             except Exception:  # noqa: BLE001
                 pass
             self.set_status("Server process was terminated.")

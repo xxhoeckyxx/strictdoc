@@ -26,6 +26,8 @@
   role="menuitem"
 >{% include "icons/ico16_import.svg" %} Import from ReqIF</a>
 
+{%- if not view_object.is_empty_tree() -%}
+
 <a
   class="dropdown_menu_item"
   href="/reqif/export_tree"
@@ -33,8 +35,6 @@
   data-testid="tree-export-reqif-action"
   role="menuitem"
 >{% include "icons/ico16_export.svg" %} Export to ReqIF</a>
-
-{%- if not view_object.is_empty_tree() -%}
 
 {%- endif -%}
 {%- endif -%}
