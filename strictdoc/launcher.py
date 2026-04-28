@@ -34,7 +34,8 @@ else:
 class StrictDocLauncher(tk.Tk):
     help_links = {
         "User Guide StrictDoc": "https://strictdoc.readthedocs.io/en/stable/stable/docs/strictdoc_01_user_guide.html",
-        "User Guide RST": "https://sphinx-tutorial.readthedocs.io/step-1/",
+        "User Guide RST docutils": "https://docutils.sourceforge.io/docs/ref/rst/directives.html",
+        "User Guide RST sphinx": "https://sphinx-tutorial.readthedocs.io/step-1/",
     }
     min_width = 420
     min_height = 230
@@ -43,7 +44,7 @@ class StrictDocLauncher(tk.Tk):
     launcher_registry_value = "settings_json"
     log_text_width_chars = 160
 
-    def __init__(self, initial_workspace: str | None = None) -> None:
+    def __init__(self, initial_workspace: str | None = None, initial_open_browser: str | None = None) -> None:
         super().__init__()
         self.title("StrictDoc Launcher")
 
@@ -73,6 +74,19 @@ class StrictDocLauncher(tk.Tk):
         except Exception:  # noqa: BLE001
             pass
 
+        # Center the main window on the primary screen.
+        try:
+            screen_w = self.winfo_screenwidth()
+            screen_h = self.winfo_screenheight()
+            width = self._collapsed_min_width
+            height = self._collapsed_min_height
+            x = max(0, (screen_w - width) // 2)
+            y = max(0, (screen_h - height) // 2)
+            self.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            # Best-effort only; do not fail the launcher if positioning fails.
+            pass
+
         # State
         self.workspace_dir: str | None = None
         self.server_process: subprocess.Popen | None = None
@@ -91,7 +105,7 @@ class StrictDocLauncher(tk.Tk):
         # StrictDoc's own EXPORT_FORMATS constant so this list stays
         # in sync with the CLI.
         self._export_formats = list(EXPORT_FORMATS)
-        self.export_format_var = tk.StringVar(value="html")
+        self.export_format_var = tk.StringVar(value="html2pdf")
 
         # Optional project title, can be written into strictdoc.toml
         # in the selected workspace.
@@ -105,7 +119,12 @@ class StrictDocLauncher(tk.Tk):
         self._build_ui()
 
         # Restore persisted launcher preferences.
-        self._load_auto_open_browser_state()
+        remembered_open_browser = self._load_auto_open_browser_state()
+        preferred_open_browser = (
+            initial_open_browser
+            if initial_open_browser is not None and str(initial_open_browser).strip()
+            else remembered_open_browser
+        )
 
         # Resolve workspace preference: explicit CLI argument wins over
         # persisted launcher preference from the previous run.
@@ -226,29 +245,9 @@ class StrictDocLauncher(tk.Tk):
         )
         self.repair_id_btn.grid(row=0, column=4, sticky="w", **PADDING)
 
-        # Help and documentation controls
-        help_frame = ttk.LabelFrame(self, text="Help & Documentation")
-        help_frame.grid(row=3, column=0, columnspan=3, sticky="nswe", **PADDING)
-
-        # Help/documentation chooser: use a dict (self.help_links)
-        # so each displayed name maps to a URL that opens in the browser.
-        self.helper_docs_var = tk.StringVar()
-        self.helper_docs_dropdown = ttk.Combobox(
-            help_frame,
-            textvariable=self.helper_docs_var,
-            values=list(self.help_links.keys()),
-            state="readonly",
-            width=20,
-        )
-        self.helper_docs_dropdown.grid(row=0, column=0, sticky="w", **PADDING)
-        self.helper_docs_dropdown.bind(
-            "<<ComboboxSelected>>",
-            lambda _event: self._open_help_link(),
-        )
-
         # Server controls
         work_frame = ttk.LabelFrame(self, text="Work")
-        work_frame.grid(row=4, column=0, columnspan=3, sticky="nsew", **PADDING)
+        work_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", **PADDING)
 
         self.server_btn = ttk.Button(
             work_frame,
@@ -271,7 +270,7 @@ class StrictDocLauncher(tk.Tk):
         self.auto_open_browser_var = tk.BooleanVar(value=False)
         self.auto_open_browser = ttk.Checkbutton(
             work_frame,
-            text="Auto-open browser on server start",
+            text="Auto open browser",
             variable=self.auto_open_browser_var,
             onvalue=True,
             offvalue=False,
@@ -279,9 +278,29 @@ class StrictDocLauncher(tk.Tk):
         )
         self.auto_open_browser.grid(row=0, column=2, sticky="w", **PADDING)
 
+        # Help/documentation chooser: show a small '?' Menubutton on the
+        # right side of the work frame that opens a menu with links.
+        self.helper_docs_var = tk.StringVar(value="?")
+
+        self.helper_docs_dropdown = ttk.Menubutton(
+            work_frame,
+            text="?",
+        )
+
+        # Create a Menu and attach it to the Menubutton. Each menu item
+        # invokes _open_help_link with the selected name.
+        menu = tk.Menu(self.helper_docs_dropdown, tearoff=0)
+        for name in self.help_links.keys():
+            menu.add_command(
+                label=name,
+                command=lambda n=name: self._open_help_link(n),
+            )
+        self.helper_docs_dropdown["menu"] = menu
+        self.helper_docs_dropdown.grid(row=0, column=3, sticky="e", **PADDING)
+
         # Log header row
         log_header_frame = ttk.Frame(self)
-        log_header_frame.grid(row=5, column=0, columnspan=3, sticky="we", **PADDING)
+        log_header_frame.grid(row=4, column=0, columnspan=3, sticky="we", **PADDING)
 
         self._log_expanded = False
         self.log_toggle_label = ttk.Label(
@@ -320,16 +339,16 @@ class StrictDocLauncher(tk.Tk):
         work_frame.columnconfigure(0, weight=0)
         work_frame.columnconfigure(1, weight=0)
         work_frame.columnconfigure(2, weight=1)
-        # Reserve a row for the collapsible log content (row 6). The log
-        # header stays on row 5, the log content is placed on row 6 when
+        # Reserve a row for the collapsible log content (row 5). The log
+        # header stays on row 4, the log content is placed on row 5 when
         # expanded so the header and controls remain visible.
-        self.rowconfigure(6, weight=1)
+        self.rowconfigure(5, weight=1)
 
         # Status bar
         ttk.Separator(self, orient="horizontal").grid(
-            row=7, column=0, columnspan=3, sticky="we"
+            row=6, column=0, columnspan=3, sticky="we"
         )
-        ttk.Label(self, text="Status:").grid(row=8, column=0, sticky="w")
+        ttk.Label(self, text="Status:").grid(row=7, column=0, sticky="w")
         self.status_var = tk.StringVar(value="Ready.")
         status_label = ttk.Label(
             self,
@@ -339,7 +358,7 @@ class StrictDocLauncher(tk.Tk):
             anchor="w",
         )
         status_label.grid(
-            row=8,
+            row=7,
             column=1,
             sticky="we",
             **PADDING
@@ -347,7 +366,7 @@ class StrictDocLauncher(tk.Tk):
 
         version_text = f"StrictDoc {self._get_strictdoc_version()}"
         version_label = ttk.Label(self, text=version_text, anchor="e")
-        version_label.grid(row=8, column=2, sticky="e", **PADDING)
+        version_label.grid(row=7, column=2, sticky="e", **PADDING)
 
         # Clean up on close
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -807,13 +826,31 @@ class StrictDocLauncher(tk.Tk):
 
             status_var.set("Export running...")
 
-            def on_export_success() -> None:
+            def on_export_success(output_dir: str) -> None:
                 self._export_in_progress = False
                 progress.stop()
                 progress.grid_remove()
                 status_var.set("Export finished.")
-                messagebox.showinfo("Export", f"Export completed in:\n{output_dir}")
                 dialog.destroy()
+
+                if not messagebox.askyesno(
+                    "Export",
+                    f"Export completed in:\n{output_dir}\n\nOpen export folder?"
+                ):
+                    return
+
+                try:
+                    if sys.platform.startswith("win"):
+                        os.startfile(output_dir)  # type: ignore[attr-defined]
+                    elif sys.platform.startswith("darwin"):
+                        subprocess.run(["open", output_dir], check=True)
+                    else:
+                        subprocess.run(["xdg-open", output_dir], check=True)
+                except Exception as exc:
+                    messagebox.showerror(
+                        "Error opening folder",
+                        f"The export folder could not be opened:\n{exc}",
+                    )
 
             def on_export_error(msg: str) -> None:
                 self._export_in_progress = False
@@ -827,7 +864,7 @@ class StrictDocLauncher(tk.Tk):
             self._run_export_thread(
                 output_dir=output_dir,
                 export_format=self.export_format_var.get(),
-                on_success=on_export_success,
+                on_success=lambda: on_export_success(output_dir),
                 on_error=on_export_error,
             )
 
@@ -1224,9 +1261,9 @@ class StrictDocLauncher(tk.Tk):
 
         self._log_expanded = not self._log_expanded
         if self._log_expanded:
-            # Place log frame in the main grid, below the log header (row 6).
+            # Place log frame in the main grid, below the log header (row 5).
             self.log_frame.grid(
-                row=6,
+                row=5,
                 column=0,
                 columnspan=3,
                 sticky="nsew",
@@ -1378,93 +1415,6 @@ class StrictDocLauncher(tk.Tk):
         new_export_path = os.path.join(directory, "export")
         self.export_path_var.set(new_export_path)
         self.set_status(f"Export path set: {new_export_path}")
-
-    def export_function(self) -> None:
-        if not self._ensure_workspace():
-            return
-        
-        if self._export_in_progress:
-            return
-
-        # Resolve target directory. If the field is empty (e.g. user
-        # hasn't changed anything and workspace was set before), fall
-        # back to the default "<workspace>/export".
-        output_dir = self.export_path_var.get().strip()
-        if not output_dir:
-            assert self.workspace_dir is not None
-            output_dir = os.path.join(self.workspace_dir, "export")
-            self.export_path_var.set(output_dir)
-
-        export_format = self.export_format_var.get() or "html"
-
-        cmd = [
-            self._python_executable(),
-            "-m",
-            "strictdoc.cli.main",
-            "export",
-            self.workspace_dir,
-            f"--formats={export_format}",
-            "--output-dir",
-            output_dir,
-        ]
-
-        # UI sperren + Progress starten
-        self._start_export_progress()
-
-        # Log export start
-        self._append_log(
-            f"[EXPORT] format={export_format} target={output_dir}\n"
-        )
-        self.set_status("Export running...")
-
-        def run_export() -> None:
-            try:
-                completed = subprocess.run(
-                    cmd,
-                    cwd=self.workspace_dir,
-                    capture_output=True,
-                    text=True,
-                )
-                if completed.returncode == 0:
-                    self.after(0, lambda: self._export_ok(output_dir))
-                else:
-                    self.after(0, lambda: self._export_failed(completed))
-                self.after(0, self._stop_export_progress)
-            except Exception as exc:  # noqa: BLE001
-                self.after(0, lambda: self._export_exception(exc))
-                self.after(0, self._stop_export_progress)
-
-        threading.Thread(target=run_export, daemon=True).start()
-
-    def _export_ok(self, output_dir: str) -> None:
-        export_format = self.export_format_var.get() or "html"
-        self.set_status(f"Export completed: {output_dir}")
-        self._append_log(
-            f"[EXPORT OK] format={export_format} target={output_dir}\n"
-        )
-        messagebox.showinfo("Export", f"Export completed in:\n{output_dir}")
-
-    def _export_failed(self, completed: subprocess.CompletedProcess) -> None:
-        self.set_status("Export failed.")
-        export_format = self.export_format_var.get() or "html"
-        self._append_log(
-            "[EXPORT FAILED] format="
-            f"{export_format} rc={completed.returncode}\n"
-        )
-        if completed.stdout:
-            self._append_log("[EXPORT STDOUT]\n" + completed.stdout + "\n")
-        if completed.stderr:
-            self._append_log("[EXPORT STDERR]\n" + completed.stderr + "\n")
-        messagebox.showerror(
-            "Export failed",
-            "Return code: "
-            f"{completed.returncode}\n\nSTDOUT:\n{completed.stdout}\n\nSTDERR:\n{completed.stderr}",
-        )
-
-    def _export_exception(self, exc: Exception) -> None:
-        self.set_status("Export failed.")
-        self._append_log(f"[EXPORT ERROR] {exc}\n")
-        messagebox.showerror("Export error", str(exc))
 
     # Server -------------------------------------------------------------
     def start_server(self) -> None:
@@ -1659,5 +1609,6 @@ class StrictDocLauncher(tk.Tk):
 
 
 def main(workspace: str | None = None) -> None:
-    app = StrictDocLauncher(initial_workspace=workspace)
+    open_browser_state = None
+    app = StrictDocLauncher(initial_workspace=workspace, initial_open_browser=open_browser_state)
     app.mainloop()

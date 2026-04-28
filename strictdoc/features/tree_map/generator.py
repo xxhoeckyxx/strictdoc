@@ -442,7 +442,7 @@ indicate how many nodes each section or node contains.
             )
         )
 
-        # FIGURE: Document tree: Requirements coverage with source.
+        # FIGURE: Document tree: Requirements coverage with implementation.
         df = df[df[PlotlyDataFrameColumn.IS_NORMATIVE]]
         fig = px.treemap(
             df,
@@ -476,7 +476,7 @@ indicate how many nodes each section or node contains.
         )
         parts.append(
             GraphSection(
-                title="Requirements coverage with source",
+                title="Requirements coverage with implementation",
                 description="""\
 This graph shows which requirements are covered by at least one source file.
 A requirement is also considered covered if it has child requirements that are
@@ -505,7 +505,7 @@ themselves covered by source files.
             )
         )
 
-        # FIGURE: Document tree: Requirements coverage with test.
+        # FIGURE: Document tree: Requirements coverage with verification.
         fig = deepcopy(fig)
         fig.update_traces(
             root_color="lightgray",
@@ -521,11 +521,11 @@ themselves covered by source files.
         )
         parts.append(
             GraphSection(
-                title="Requirements coverage with test",
+                title="Requirements coverage with verification",
                 description="""\
-This graph shows which requirements are covered by at least one test.
+This graph shows which requirements are covered by at least one unit-test.
 A requirement is also considered covered if it has child requirements that are
-themselves covered by tests. A source file is considered a test file if its path
+themselves covered by unit-tests. A source file is considered a test file if its path
 contains "tests/".
 
 <ul>
