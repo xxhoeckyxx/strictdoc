@@ -32,11 +32,16 @@ else:
 
 
 class StrictDocLauncher(tk.Tk):
-    min_width = 500
+    help_links = {
+        "User Guide StrictDoc": "https://strictdoc.readthedocs.io/en/stable/stable/docs/strictdoc_01_user_guide.html",
+        "User Guide RST": "https://sphinx-tutorial.readthedocs.io/step-1/",
+    }
+    min_width = 420
     min_height = 230
     launcher_settings_filename = ".strictdoc_launcher.json"
     launcher_registry_key = r"Software\StrictDoc\Launcher"
     launcher_registry_value = "settings_json"
+    log_text_width_chars = 160
 
     def __init__(self, initial_workspace: str | None = None) -> None:
         super().__init__()
@@ -72,6 +77,7 @@ class StrictDocLauncher(tk.Tk):
         self.workspace_dir: str | None = None
         self.server_process: subprocess.Popen | None = None
         self._log_thread: threading.Thread | None = None
+        self._server_ready = False
 
         # Export state
         self._export_in_progress = False
@@ -97,6 +103,9 @@ class StrictDocLauncher(tk.Tk):
         self.export_path_var = tk.StringVar()
 
         self._build_ui()
+
+        # Restore persisted launcher preferences.
+        self._load_auto_open_browser_state()
 
         # Resolve workspace preference: explicit CLI argument wins over
         # persisted launcher preference from the previous run.
@@ -173,7 +182,7 @@ class StrictDocLauncher(tk.Tk):
         ttk.Label(self, text="Workspace:").grid(row=1, column=0, sticky="w", **PADDING)
 
         self.workspace_var = tk.StringVar()
-        self.workspace_entry = ttk.Entry(self, width=50, textvariable=self.workspace_var)
+        self.workspace_entry = ttk.Entry(self, width=40, textvariable=self.workspace_var)
 
         self.workspace_entry.grid(row=1, column=1, sticky="we", **PADDING)
         # Pressing Enter in the workspace field validates and applies the path.
@@ -217,9 +226,29 @@ class StrictDocLauncher(tk.Tk):
         )
         self.repair_id_btn.grid(row=0, column=4, sticky="w", **PADDING)
 
+        # Help and documentation controls
+        help_frame = ttk.LabelFrame(self, text="Help & Documentation")
+        help_frame.grid(row=3, column=0, columnspan=3, sticky="nswe", **PADDING)
+
+        # Help/documentation chooser: use a dict (self.help_links)
+        # so each displayed name maps to a URL that opens in the browser.
+        self.helper_docs_var = tk.StringVar()
+        self.helper_docs_dropdown = ttk.Combobox(
+            help_frame,
+            textvariable=self.helper_docs_var,
+            values=list(self.help_links.keys()),
+            state="readonly",
+            width=20,
+        )
+        self.helper_docs_dropdown.grid(row=0, column=0, sticky="w", **PADDING)
+        self.helper_docs_dropdown.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._open_help_link(),
+        )
+
         # Server controls
         work_frame = ttk.LabelFrame(self, text="Work")
-        work_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", **PADDING)
+        work_frame.grid(row=4, column=0, columnspan=3, sticky="nsew", **PADDING)
 
         self.server_btn = ttk.Button(
             work_frame,
@@ -227,7 +256,7 @@ class StrictDocLauncher(tk.Tk):
             style="green.TButton",
             command=self._toggle_server,
         )
-        self.server_btn.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.server_btn.grid(row=0, column=0, sticky="w", **PADDING)
 
         self.open_browser_btn = ttk.Button(
             work_frame,
@@ -235,11 +264,24 @@ class StrictDocLauncher(tk.Tk):
             command=self.open_browser,
             state="disabled",
         )
-        self.open_browser_btn.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self.open_browser_btn.grid(row=0, column=1, sticky="w", **PADDING)
+
+        # Auto-open browser option. Use a BooleanVar so checking the box
+        # only sets the preference — it must not immediately open the browser.
+        self.auto_open_browser_var = tk.BooleanVar(value=False)
+        self.auto_open_browser = ttk.Checkbutton(
+            work_frame,
+            text="Auto-open browser on server start",
+            variable=self.auto_open_browser_var,
+            onvalue=True,
+            offvalue=False,
+            command=self._on_auto_open_browser_changed,
+        )
+        self.auto_open_browser.grid(row=0, column=2, sticky="w", **PADDING)
 
         # Log header row
         log_header_frame = ttk.Frame(self)
-        log_header_frame.grid(row=4, column=0, columnspan=3, sticky="we", **PADDING)
+        log_header_frame.grid(row=5, column=0, columnspan=3, sticky="we", **PADDING)
 
         self._log_expanded = False
         self.log_toggle_label = ttk.Label(
@@ -247,7 +289,7 @@ class StrictDocLauncher(tk.Tk):
             text="▶ Server log",
             cursor="hand2",
         )
-        self.log_toggle_label.grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        self.log_toggle_label.grid(row=0, column=0, sticky="w", **PADDING)
         self.log_toggle_label.bind("<Button-1>", lambda _event: self._toggle_log())
 
         self.clear_log_btn = ttk.Button(
@@ -255,14 +297,15 @@ class StrictDocLauncher(tk.Tk):
             text="Clear Log",
             command=self._clear_log,
         )
-        self.clear_log_btn.grid(row=0, column=1, padx=5, pady=2, sticky="w")
+        self.clear_log_btn.grid(row=0, column=1, sticky="w", **PADDING)
         self.clear_log_btn.grid_remove()
 
         # Collapsible log area
         self.log_frame = ttk.Frame(self)
         self.log_text = tk.Text(
             self.log_frame,
-            height=10,
+            height=30,
+            width=self.log_text_width_chars,
             wrap="word",
             state="disabled",
             font=("Consolas", 9),
@@ -277,13 +320,16 @@ class StrictDocLauncher(tk.Tk):
         work_frame.columnconfigure(0, weight=0)
         work_frame.columnconfigure(1, weight=0)
         work_frame.columnconfigure(2, weight=1)
-        self.rowconfigure(5, weight=1)
+        # Reserve a row for the collapsible log content (row 6). The log
+        # header stays on row 5, the log content is placed on row 6 when
+        # expanded so the header and controls remain visible.
+        self.rowconfigure(6, weight=1)
 
         # Status bar
         ttk.Separator(self, orient="horizontal").grid(
-            row=6, column=0, columnspan=3, sticky="we"
+            row=7, column=0, columnspan=3, sticky="we"
         )
-        ttk.Label(self, text="Status:").grid(row=7, column=0, sticky="w")
+        ttk.Label(self, text="Status:").grid(row=8, column=0, sticky="w")
         self.status_var = tk.StringVar(value="Ready.")
         status_label = ttk.Label(
             self,
@@ -293,7 +339,7 @@ class StrictDocLauncher(tk.Tk):
             anchor="w",
         )
         status_label.grid(
-            row=7,
+            row=8,
             column=1,
             sticky="we",
             **PADDING
@@ -301,7 +347,7 @@ class StrictDocLauncher(tk.Tk):
 
         version_text = f"StrictDoc {self._get_strictdoc_version()}"
         version_label = ttk.Label(self, text=version_text, anchor="e")
-        version_label.grid(row=7, column=2, sticky="e", **PADDING)
+        version_label.grid(row=8, column=2, sticky="e", **PADDING)
 
         # Clean up on close
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -310,6 +356,21 @@ class StrictDocLauncher(tk.Tk):
     def set_status(self, text: str) -> None:
         self.status_var.set(text)
         self.update_idletasks()
+
+    def _open_help_link(self, selection: str | None = None) -> None:
+        """Open the selected help/documentation link in the default browser."""
+        sel = selection or getattr(self, "helper_docs_var", tk.StringVar()).get()
+        if not sel:
+            return
+        url = self.help_links.get(sel)
+        if not url:
+            messagebox.showinfo("Help", "No link available for the selected item.")
+            return
+        try:
+            webbrowser.open(url)
+            self.set_status(f"Opening help: {sel}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Open help failed", str(exc))
 
     def _get_strictdoc_version(self) -> str:
         try:
@@ -400,6 +461,30 @@ class StrictDocLauncher(tk.Tk):
         launcher_section["last_workspace"] = workspace_path
         settings["launcher"] = launcher_section
         self._save_launcher_settings(settings)
+
+    def _load_auto_open_browser_state(self) -> None:
+        settings = self._load_launcher_settings()
+        launcher_section = settings.get("launcher", {})
+        if not isinstance(launcher_section, dict):
+            return
+
+        value = launcher_section.get("auto_open_browser")
+        if isinstance(value, bool) and hasattr(self, "auto_open_browser_var"):
+            self.auto_open_browser_var.set(value)
+
+    def _save_auto_open_browser_state(self) -> None:
+        settings = self._load_launcher_settings()
+        launcher_section = settings.get("launcher", {})
+        if not isinstance(launcher_section, dict):
+            launcher_section = {}
+        launcher_section["auto_open_browser"] = bool(
+            self.auto_open_browser_var.get() if hasattr(self, "auto_open_browser_var") else False
+        )
+        settings["launcher"] = launcher_section
+        self._save_launcher_settings(settings)
+
+    def _on_auto_open_browser_changed(self) -> None:
+        self._save_auto_open_browser_state()
 
     def _busy_cursor_name(self) -> str:
         if sys.platform == "win32":
@@ -614,14 +699,27 @@ class StrictDocLauncher(tk.Tk):
         dialog.title("Export")
         dialog.transient(self)
         dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.columnconfigure(0, weight=1)
 
-        padding: dict[str, Any] = {"padx": 12, "pady": 6}
+        padding: dict[str, Any] = {"padx": 6, "pady": 3}
 
-        frame = ttk.LabelFrame(dialog, text="Export")
-        frame.grid(row=0, column=0, sticky="nsew", **padding)
+        content = ttk.Frame(dialog)
+        content.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        content.columnconfigure(1, weight=1)
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.grid(row=1, column=0, sticky="e", padx=8, pady=(0, 8))
+
+        # Reserve vertical space for the progress bar so it can appear
+        # later without resizing the dialog.
+        progress_area = ttk.Frame(content, height=20)
+        progress_area.grid(row=2, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        progress_area.grid_propagate(False)
+        progress_area.columnconfigure(0, weight=1)
 
         # Export format -------------------------------------------------
-        ttk.Label(frame, text="Format:").grid(row=0, column=0, sticky="w")
+        ttk.Label(content, text="Format:").grid(row=0, column=0, sticky="w", **padding)
 
         # Make sure a valid format is selected.
         if self.export_format_var.get() not in self._export_formats:
@@ -629,46 +727,66 @@ class StrictDocLauncher(tk.Tk):
                 self.export_format_var.set(self._export_formats[0])
 
         format_combo = ttk.Combobox(
-            frame,
+            content,
             textvariable=self.export_format_var,
             values=self._export_formats,
             state="readonly",
             width=15,
         )
-        format_combo.grid(row=0, column=1, sticky="we", padx=(8, 0))
+        format_combo.grid(row=0, column=1, sticky="we", **padding)
 
         # Export target path -------------------------------------------
-        ttk.Label(frame, text="Path:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(content, text="Path:").grid(row=1, column=0, sticky="w", **padding)
 
-        path_entry = ttk.Entry(frame, textvariable=self.export_path_var, width=40)
-        path_entry.grid(row=1, column=1, sticky="we", pady=(8, 0))
+        path_entry = ttk.Entry(content, textvariable=self.export_path_var, width=40)
+        path_entry.grid(row=1, column=1, sticky="we", **padding)
 
-        browse_btn = ttk.Button(frame, text="Browse ...", command=self.choose_export_path)
-        browse_btn.grid(row=1, column=2, padx=(8, 0), pady=(8, 0))
-
-        frame.columnconfigure(1, weight=1)
+        browse_btn = ttk.Button(content, text="Browse ...", command=self.choose_export_path)
+        browse_btn.grid(row=1, column=2, **padding)
 
         # ProgressBar  -------------------------------------------------
-        progress = ttk.Progressbar(frame, mode="indeterminate", length=220)
-        progress.grid(row=2, column=0, columnspan=3, pady=(10, 0))
+        progress = ttk.Progressbar(progress_area, mode="indeterminate")
+        progress.grid(row=0, column=0, sticky="we")
         progress.grid_remove()
 
-        # Status Label -------------------------------------------------
-        status_var = tk.StringVar(value="Ready.")
-        status_label = ttk.Label(frame, textvariable=status_var)
-        status_label.grid(row=3, column=0, columnspan=3, sticky="w", pady=(5, 0))
-
-        frame.columnconfigure(1, weight=1)
-
         # Action buttons -----------------------------------------------
-        button_frame = ttk.Frame(dialog)
-        button_frame.grid(row=1, column=0, sticky="e", **padding)
-
-        cancel_btn = ttk.Button(button_frame, text="Cancel", command=dialog.destroy)
         export_btn = ttk.Button(button_frame, text="Export")
+        cancel_btn = ttk.Button(button_frame, text="Cancel", command=dialog.destroy)
 
-        cancel_btn.grid(row=0, column=0, padx=(0, 8))
-        export_btn.grid(row=0, column=1)
+        export_btn.grid(row=0, column=0, padx=(0, 8))
+        cancel_btn.grid(row=0, column=1)
+
+        # Status Bar ---------------------------------------------------
+        ttk.Separator(dialog, orient="horizontal").grid(
+            row=2, column=0, sticky="we", padx=8
+        )
+
+        status_frame = ttk.Frame(dialog)
+        status_frame.grid(row=3, column=0, sticky="we", padx=8, pady=(6, 8))
+        status_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(status_frame, text="Status:").grid(row=0, column=0, sticky="w")
+        status_var = tk.StringVar(value="Ready.")
+        status_label = ttk.Label(
+            status_frame,
+            textvariable=status_var,
+            relief="sunken",
+            borderwidth=1,
+            anchor="w",
+        )
+        status_label.grid(row=0, column=1, sticky="we", padx=(6, 0))
+
+        # Freeze the dialog to a typical fixed-size dialog behavior.
+        dialog.update_idletasks()
+        dialog_width = dialog.winfo_reqwidth()
+        dialog_height = dialog.winfo_reqheight()
+        parent_x = self.winfo_rootx()
+        parent_y = self.winfo_rooty()
+        parent_width = self.winfo_width()
+        parent_height = self.winfo_height()
+        dialog_x = parent_x + max(0, (parent_width - dialog_width) // 2)
+        dialog_y = parent_y + max(0, (parent_height - dialog_height) // 2)
+        dialog.geometry(f"{dialog_width}x{dialog_height}+{dialog_x}+{dialog_y}")
 
         # Export-Logik im Dialog
         def start_export():
@@ -1056,8 +1174,10 @@ class StrictDocLauncher(tk.Tk):
         """Disable config/workspace changes while the server is running."""
 
         self.server_btn.configure(text="Stop server", style="red.TButton")
-        self.open_browser_btn.configure(state="normal", style="green.TButton")
+        self.open_browser_btn.configure(state="disabled", style="green.TButton")
+        self.auto_open_browser.configure(state="disabled")
         self.export_btn.configure(state="disabled")
+        self._server_ready = False
 
         # Lock all controls that would modify project layout/config
         # while the server is active.
@@ -1072,7 +1192,9 @@ class StrictDocLauncher(tk.Tk):
 
         self.server_btn.configure(text="Start server", style="green.TButton")
         self.open_browser_btn.configure(state="disabled", style="red.TButton")
+        self.auto_open_browser.configure(state="normal")
         self.export_btn.configure(state="normal")
+        self._server_ready = False
 
         self.workspace_entry.configure(state="normal")
         self.workspace_select_btn.configure(state="normal")
@@ -1102,9 +1224,9 @@ class StrictDocLauncher(tk.Tk):
 
         self._log_expanded = not self._log_expanded
         if self._log_expanded:
-            # Place log frame in the main grid, below the log header.
+            # Place log frame in the main grid, below the log header (row 6).
             self.log_frame.grid(
-                row=5,
+                row=6,
                 column=0,
                 columnspan=3,
                 sticky="nsew",
@@ -1114,14 +1236,15 @@ class StrictDocLauncher(tk.Tk):
             self.log_toggle_label.configure(text="▼ Server log")
             self.clear_log_btn.grid()
 
-            # Recompute requested size with log visible and update the
-            # minimum window size so the log cannot be clipped.
+            # Recompute requested size with log visible. Width grows only
+            # as needed, while the collapsed size stays compact.
             self.update_idletasks()
             req_width = self.winfo_reqwidth()
             req_height = self.winfo_reqheight()
-            self.minsize(req_width, req_height)
+            target_width = max(self._collapsed_min_width, req_width)
+            self.minsize(target_width, req_height)
 
-            # Ensure the current window is at least as large as needed.
+            # Ensure the current window is large enough in both dimensions.
             cur_width = self.winfo_width()
             cur_height = self.winfo_height()
             target_width = max(cur_width, req_width)
@@ -1132,18 +1255,15 @@ class StrictDocLauncher(tk.Tk):
             self.log_toggle_label.configure(text="▶ Server log")
             self.clear_log_btn.grid_remove()
 
-            # Recompute requested size of the collapsed layout and use
-            # it as the new minimum size. Then shrink the window
-            # height back to that baseline while keeping the width.
+            # Recompute requested height of the collapsed layout. Width stays
+            # fixed at the precomputed minimum so the window never shrinks
+            # horizontally when the log is toggled.
             self.update_idletasks()
-            req_width = self.winfo_reqwidth()
             req_height = self.winfo_reqheight()
-            self._collapsed_min_width = req_width
             self._collapsed_min_height = req_height
-            self.minsize(req_width, req_height)
+            self.minsize(self._collapsed_min_width, req_height)
 
-            cur_width = self.winfo_width()
-            self.geometry(f"{cur_width}x{req_height}")
+            self.geometry(f"{self._collapsed_min_width}x{req_height}")
 
     def _repair_ids(self) -> None:
         """Run StrictDoc's auto-UID management on the current workspace.
@@ -1439,10 +1559,33 @@ class StrictDocLauncher(tk.Tk):
             for line in self.server_process.stdout:
                 if line is None:
                     break
-                self.after(0, lambda l=line: self._append_log(l))
+                self.after(0, lambda l=line: self._handle_server_log_line(l))
 
         self._log_thread = threading.Thread(target=reader, daemon=True)
         self._log_thread.start()
+
+    def _handle_server_log_line(self, text: str) -> None:
+        self._append_log(text)
+
+        if self._server_ready:
+            return
+
+        normalized = text.strip().lower()
+        ready_markers = (
+            "uvicorn running on",
+            "application startup complete",
+            "started server process",
+        )
+        if any(marker in normalized for marker in ready_markers):
+            self._server_ready = True
+            self.open_browser_btn.configure(state="normal", style="green.TButton")
+            self.set_status("Server is ready.")
+            try:
+                if getattr(self, "auto_open_browser_var", None) and self.auto_open_browser_var.get():
+                    # Ensure we call open_browser on the main thread.
+                    self.after(100, self.open_browser)
+            except Exception:
+                pass
 
     def _append_log(self, text: str) -> None:
         # keep log text widget editable only internally
@@ -1486,6 +1629,13 @@ class StrictDocLauncher(tk.Tk):
         """Open the default web browser pointing to the running server."""
 
         # Only meaningful if the server is actually running.
+        if not self._server_ready:
+            messagebox.showinfo(
+                "Server not ready",
+                "Please wait until the server has finished starting.",
+            )
+            return
+
         if not (self.server_process and self.server_process.poll() is None):
             messagebox.showinfo(
                 "Server not running",
