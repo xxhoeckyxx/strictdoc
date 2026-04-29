@@ -338,19 +338,29 @@ def test_unit(context, coverage=False, focus=None, path=None, output=False):
         assert "tests/unit" in path, path
 
     path_to_coverage_file = f"{cwd}/build/coverage/unit/.coverage"
+
+    pytest_command = (
+        """
+        coverage run
+            --rcfile=.coveragerc.unit
+            --data-file={path_to_coverage_file}
+            -m pytest
+    """
+        if coverage
+        else "pytest"
+    )
+
     run_invoke_with_tox(
         context,
         ToxEnvironment.CHECK,
         f"""
-            coverage run
-            --rcfile=.coveragerc.unit
-            --data-file={path_to_coverage_file}
-            -m pytest
+            {pytest_command}
             {focus_argument}
             {output_argument}
             --junit-xml={TEST_REPORTS_DIR}/tests_unit.pytest.junit.xml
             -o cache_dir=build/pytest_unit_with_coverage
             -o junit_suite_name="StrictDoc Unit Tests"
+            -p no:seleniumbase
             {path}
         """,
     )

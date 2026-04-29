@@ -50,6 +50,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
@@ -96,7 +97,7 @@ dependencies = [
     "reqif >= 0.0.39, == 0.*",
 
     # SPDX
-    "spdx-tools",
+    "spdx-tools >= 0.8.5",
 
     # Web server dependencies
     "fastapi >= 0.83.0",

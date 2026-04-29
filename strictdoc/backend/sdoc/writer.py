@@ -502,18 +502,44 @@ class SDWriter:
                     output += "  FORMAT: "
                     output += file_format
                     output += "\n"
-                output += "  VALUE: "
+
+                if ref.g_file_entry.g_deprecated_file_path is not None:
+                    output += "  VALUE: "
+                else:
+                    output += "  PATH: "
+
                 output += ref.get_posix_path()
                 output += "\n"
-                if ref.g_file_entry.line_range is not None:
+                if (
+                    ref.g_file_entry.deprecated_function is None
+                    and ref.g_file_entry.deprecated_clazz is None
+                    and ref.g_file_entry.element is not None
+                    and ref.g_file_entry.id is not None
+                ):
+                    output += "  ELEMENT: "
+                    output += ref.g_file_entry.element
+                    output += "\n"
+                    output += "  ID: "
+                    output += ref.g_file_entry.id
+                    output += "\n"
+                elif ref.g_file_entry.line_range is not None:
                     output += "  LINE_RANGE: "
                     output += str(ref.g_file_entry.line_range[0])
                     output += ", "
                     output += str(ref.g_file_entry.line_range[1])
                     output += "\n"
-                elif ref.g_file_entry.function is not None:
+                elif ref.g_file_entry.deprecated_function is not None:
                     output += "  FUNCTION: "
-                    output += str(ref.g_file_entry.function)
+                    output += str(ref.g_file_entry.deprecated_function)
+                    output += "\n"
+                elif ref.g_file_entry.deprecated_clazz is not None:
+                    output += "  CLASS: "
+                    output += str(ref.g_file_entry.deprecated_clazz)
+                    output += "\n"
+
+                if ref.g_file_entry.hash is not None:
+                    output += "  HASH: "
+                    output += str(ref.g_file_entry.hash)
                     output += "\n"
 
             elif isinstance(reference, ParentReqReference):
