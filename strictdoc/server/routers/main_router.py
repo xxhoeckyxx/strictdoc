@@ -1374,7 +1374,9 @@ def create_main_router(
         "/actions/document/delete_document",
         response_class=Response,
     )
-    def delete_document(document_mid: str) -> Response:
+    def delete_document(
+        document_mid: str, confirmed: bool = False
+    ) -> Response:
         """Delete an entire SDOC document from the project.
 
         This endpoint is intentionally simple: it removes the underlying
@@ -1388,6 +1390,44 @@ def create_main_router(
             SDocDocument,
         )
         assert document.meta is not None
+
+        errors: List[str] = []
+        try:
+            export_action.traceability_index.validate_can_remove_document(
+                document
+            )
+        except MultipleValidationErrorAsList as error_:
+            errors = error_.errors
+
+        if not confirmed:
+            output = env().render_template_as_markup(
+                "actions/document/delete_document/"
+                "stream_confirm_delete_document.jinja",
+                document_mid=document_mid,
+                errors=errors,
+            )
+            return HTMLResponse(
+                content=output,
+                status_code=200 if len(errors) == 0 else 422,
+                headers={
+                    "Content-Type": "text/vnd.turbo-stream.html",
+                },
+            )
+
+        if len(errors) > 0:
+            output = env().render_template_as_markup(
+                "actions/document/delete_document/"
+                "stream_confirm_delete_document.jinja",
+                document_mid=document_mid,
+                errors=errors,
+            )
+            return HTMLResponse(
+                content=output,
+                status_code=422,
+                headers={
+                    "Content-Type": "text/vnd.turbo-stream.html",
+                },
+            )
 
         # Remove the underlying SDOC file.
         path_to_document = document.meta.input_doc_full_path
@@ -1404,7 +1444,6 @@ def create_main_router(
         # Not all of these files are guaranteed to exist (e.g. PDF export).
         html_paths = [
             document.meta.get_html_doc_path(),
-            document.meta.get_html_doc_standalone_path(),
             document.meta.get_html_table_path(),
             document.meta.get_html_traceability_path(),
             document.meta.get_html_deep_traceability_path(),
