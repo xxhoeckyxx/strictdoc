@@ -8,10 +8,12 @@ STATEMENT: Requirement Statement
 RELATIONS:
 - TYPE: File
   VALUE: file.c
-  FUNCTION: hello_world
+  ELEMENT: function
+  ID: hello_world
 - TYPE: File
   VALUE: file.c
-  FUNCTION: hello_world_2
+  ELEMENT: function
+  ID: hello_world_2
 
 [REQUIREMENT]
 UID: REQ-2
