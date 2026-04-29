@@ -7,6 +7,7 @@ import threading
 import webbrowser
 import subprocess
 import tkinter as tk
+import strictdoc.features.git_update.git_action as git_action
 from tkinter import filedialog, messagebox, ttk
 from importlib.resources import files
 from typing import Any
@@ -235,7 +236,7 @@ class StrictDocLauncher(tk.Tk):
             command=self.open_workspace_in_explorer,
             state="disabled",
         )
-        self.open_folder_btn.grid(row=0, column=3, sticky="e", **PADDING)
+        self.open_folder_btn.grid(row=0, column=2, sticky="e", **PADDING)
 
         # Repair ID button
         self.repair_id_btn = ttk.Button(
@@ -243,7 +244,24 @@ class StrictDocLauncher(tk.Tk):
             text="Repair IDs",
             command=self._repair_ids,
         )
-        self.repair_id_btn.grid(row=0, column=4, sticky="w", **PADDING)
+
+        self.git_actions_dropdown = ttk.Menubutton(
+            maintenance_frame,
+            text="Git",
+        )
+        self.repair_id_btn.grid(row=0, column=3, sticky="w", **PADDING)
+
+
+        """ Possability to add git actions in the future, e.g. git pull, git commit, git push, etc. """
+        # maintenance_frame.columnconfigure(4, weight=1)
+
+        # git_menu = tk.Menu(self.git_actions_dropdown, tearoff=0)
+        # git_menu.add_command(label="Git Pull", command=lambda: git_action._git_pull(self))
+        # git_menu.add_command(label="Git Commit & Push", command=lambda: (git_action._git_commit(self), git_action._git_push(self)))
+        # git_menu.add_command(label="Git Commit", command=lambda: git_action._git_commit(self))
+        # git_menu.add_command(label="Git Push", command=lambda: git_action._git_push(self))
+        # self.git_actions_dropdown["menu"] = git_menu
+        # self.git_actions_dropdown.grid(row=0, column=5, sticky="e", **PADDING)
 
         # Server controls
         work_frame = ttk.LabelFrame(self, text="Work")
