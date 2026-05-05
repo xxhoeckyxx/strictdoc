@@ -43,6 +43,7 @@ class StrictDocLauncher(tk.Tk):
     launcher_settings_filename = ".strictdoc_launcher.json"
     launcher_registry_key = r"Software\StrictDoc\Launcher"
     launcher_registry_value = "settings_json"
+    max_recent_workspaces = 5
     log_text_width_chars = 160
 
     def __init__(self, initial_workspace: str | None = None, initial_open_browser: str | None = None) -> None:
@@ -90,6 +91,7 @@ class StrictDocLauncher(tk.Tk):
 
         # State
         self.workspace_dir: str | None = None
+        self._recent_workspaces: list[str] = self._load_recent_workspaces()
         self.server_process: subprocess.Popen | None = None
         self._log_thread: threading.Thread | None = None
         self._server_ready = False
@@ -202,11 +204,19 @@ class StrictDocLauncher(tk.Tk):
         ttk.Label(self, text="Workspace:").grid(row=1, column=0, sticky="w", **PADDING)
 
         self.workspace_var = tk.StringVar()
-        self.workspace_entry = ttk.Entry(self, width=40, textvariable=self.workspace_var)
+        self.workspace_entry = ttk.Combobox(
+            self,
+            width=40,
+            textvariable=self.workspace_var,
+            values=self._recent_workspaces,
+        )
 
         self.workspace_entry.grid(row=1, column=1, sticky="we", **PADDING)
         # Pressing Enter in the workspace field validates and applies the path.
         self.workspace_entry.bind("<Return>", lambda _event: self._on_workspace_enter())
+        self.workspace_entry.bind(
+            "<<ComboboxSelected>>", lambda _event: self._on_workspace_enter()
+        )
 
         self.workspace_select_btn = ttk.Button(self, text="Select ...", command=self.choose_workspace)
         self.workspace_select_btn.grid(row=1, column=2, sticky="we", **PADDING)
@@ -245,23 +255,28 @@ class StrictDocLauncher(tk.Tk):
             command=self._repair_ids,
         )
 
+        self.repair_id_btn.grid(row=0, column=3, sticky="w", **PADDING)
+
         self.git_actions_dropdown = ttk.Menubutton(
             maintenance_frame,
             text="Git",
         )
-        self.repair_id_btn.grid(row=0, column=3, sticky="w", **PADDING)
+        maintenance_frame.columnconfigure(4, weight=1)
 
-
-        """ Possability to add git actions in the future, e.g. git pull, git commit, git push, etc. """
-        # maintenance_frame.columnconfigure(4, weight=1)
-
-        # git_menu = tk.Menu(self.git_actions_dropdown, tearoff=0)
-        # git_menu.add_command(label="Git Pull", command=lambda: git_action._git_pull(self))
-        # git_menu.add_command(label="Git Commit & Push", command=lambda: (git_action._git_commit(self), git_action._git_push(self)))
-        # git_menu.add_command(label="Git Commit", command=lambda: git_action._git_commit(self))
-        # git_menu.add_command(label="Git Push", command=lambda: git_action._git_push(self))
-        # self.git_actions_dropdown["menu"] = git_menu
-        # self.git_actions_dropdown.grid(row=0, column=5, sticky="e", **PADDING)
+        git_menu = tk.Menu(self.git_actions_dropdown, tearoff=0)
+        git_actions = [
+            ("Git Pull", lambda: git_action._git_pull(self)),
+            (
+                "Git Commit & Push",
+                lambda: (git_action._git_commit(self), git_action._git_push(self)),
+            ),
+            ("Git Commit", lambda: git_action._git_commit(self)),
+            ("Git Push", lambda: git_action._git_push(self)),
+        ]
+        for label, command in git_actions:
+            git_menu.add_command(label=label, command=command)
+        self.git_actions_dropdown["menu"] = git_menu
+        self.git_actions_dropdown.grid(row=0, column=5, sticky="e", **PADDING)
 
         # Server controls
         work_frame = ttk.LabelFrame(self, text="Work")
@@ -490,14 +505,68 @@ class StrictDocLauncher(tk.Tk):
                 return value.strip()
         return None
 
+    def _load_recent_workspaces(self) -> list[str]:
+        settings = self._load_launcher_settings()
+        launcher_section = settings.get("launcher", {})
+        if not isinstance(launcher_section, dict):
+            return []
+
+        value = launcher_section.get("recent_workspaces")
+        if not isinstance(value, list):
+            return []
+
+        result: list[str] = []
+        for entry in value:
+            if not isinstance(entry, str):
+                continue
+            normalized = entry.strip()
+            if not normalized:
+                continue
+            normalized = os.path.abspath(normalized)
+            if normalized in result:
+                continue
+            result.append(normalized)
+            if len(result) >= self.max_recent_workspaces:
+                break
+        return result
+
+    def _refresh_recent_workspaces_ui(self) -> None:
+        if hasattr(self, "workspace_entry"):
+            self.workspace_entry.configure(values=self._recent_workspaces)
+
     def _save_last_workspace(self, workspace_path: str) -> None:
         settings = self._load_launcher_settings()
         launcher_section = settings.get("launcher", {})
         if not isinstance(launcher_section, dict):
             launcher_section = {}
-        launcher_section["last_workspace"] = workspace_path
+
+        normalized_workspace = os.path.abspath(workspace_path)
+        previous_workspaces = launcher_section.get("recent_workspaces", [])
+        previous_recent: list[str] = []
+        if isinstance(previous_workspaces, list):
+            for entry in previous_workspaces:
+                if not isinstance(entry, str):
+                    continue
+                normalized_entry = entry.strip()
+                if not normalized_entry:
+                    continue
+                normalized_entry = os.path.abspath(normalized_entry)
+                if normalized_entry in previous_recent:
+                    continue
+                previous_recent.append(normalized_entry)
+
+        recent_workspaces = [
+            normalized_workspace,
+            *[path for path in previous_recent if path != normalized_workspace],
+        ][: self.max_recent_workspaces]
+
+        launcher_section["last_workspace"] = normalized_workspace
+        launcher_section["recent_workspaces"] = recent_workspaces
         settings["launcher"] = launcher_section
         self._save_launcher_settings(settings)
+
+        self._recent_workspaces = recent_workspaces
+        self._refresh_recent_workspaces_ui()
 
     def _load_auto_open_browser_state(self) -> None:
         settings = self._load_launcher_settings()
