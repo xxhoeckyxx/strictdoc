@@ -366,6 +366,14 @@ class StrictDocLauncher(tk.Tk):
         self.log_text.configure(yscrollcommand=scrollbar.set)
         self.log_text.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
+        # Configure tags for colored log output
+        try:
+            self.log_text.tag_configure("error", foreground="#c00000")
+            self.log_text.tag_configure("warning", foreground="#b06a00")
+            self.log_text.tag_configure("success", foreground="#007a00")
+            self.log_text.tag_configure("info", foreground="#000000")
+        except Exception:
+            pass
         self.log_frame.columnconfigure(0, weight=1)
         self.log_frame.rowconfigure(0, weight=1)
         # Layout weights
@@ -1604,6 +1612,40 @@ class StrictDocLauncher(tk.Tk):
     def _handle_server_log_line(self, text: str) -> None:
         self._append_log(text)
 
+        # If the server outputs an error/exception/traceback, auto-expand
+        # the log area so the user can inspect the failure immediately.
+        try:
+            normalized = text.strip().lower()
+            # Detect common error indicators. Use word-boundary for 'error'
+            # to reduce false positives.
+            if (
+                "traceback" in normalized
+                or "exception" in normalized
+                or "failed" in normalized
+                or re.search(r"\berror\b", normalized)
+            ):
+                try:
+                    if not self._log_expanded:
+                        self._toggle_log()
+                    # Try to bring the window to the front to draw attention.
+                    try:
+                        self.lift()
+                        self.focus_force()
+                        try:
+                            # Temporarily set topmost to ensure visibility on some platforms.
+                            self.attributes("-topmost", True)
+                            self.after(200, lambda: self.attributes("-topmost", False))
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    self.set_status("Server error detected. See log.")
+                except Exception:
+                    pass
+        except Exception:
+            # Never let log-handling failures crash the launcher.
+            pass
+
         if self._server_ready:
             return
 
@@ -1626,10 +1668,35 @@ class StrictDocLauncher(tk.Tk):
 
     def _append_log(self, text: str) -> None:
         # keep log text widget editable only internally
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", text)
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+        try:
+            self.log_text.configure(state="normal")
+
+            normalized = text.strip().lower()
+            tag = None
+            if "traceback" in normalized or "exception" in normalized or re.search(r"\berror\b", normalized) or "failed" in normalized:
+                tag = "error"
+            elif "warning" in normalized or "warn" in normalized:
+                tag = "warning"
+            elif "started" in normalized or "ok" in normalized or "completed" in normalized:
+                tag = "success"
+            else:
+                tag = "info"
+
+            if tag:
+                try:
+                    self.log_text.insert("end", text, (tag,))
+                except Exception:
+                    # Fall back to plain insert if tag insertion fails.
+                    self.log_text.insert("end", text)
+            else:
+                self.log_text.insert("end", text)
+
+            self.log_text.see("end")
+        finally:
+            try:
+                self.log_text.configure(state="disabled")
+            except Exception:
+                pass
 
     def _clear_log(self) -> None:
         # Clear all text from the log widget
