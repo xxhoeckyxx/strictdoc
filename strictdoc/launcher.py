@@ -257,26 +257,26 @@ class StrictDocLauncher(tk.Tk):
 
         self.repair_id_btn.grid(row=0, column=3, sticky="w", **PADDING)
 
-        self.git_actions_dropdown = ttk.Menubutton(
-            maintenance_frame,
-            text="Git",
-        )
-        maintenance_frame.columnconfigure(4, weight=1)
+        # self.git_actions_dropdown = ttk.Menubutton(
+        #     maintenance_frame,
+        #     text="Git",
+        # )
+        # maintenance_frame.columnconfigure(4, weight=1)
 
-        git_menu = tk.Menu(self.git_actions_dropdown, tearoff=0)
-        git_actions = [
-            ("Git Pull", lambda: git_action._git_pull(self)),
-            (
-                "Git Commit & Push",
-                lambda: (git_action._git_commit(self), git_action._git_push(self)),
-            ),
-            ("Git Commit", lambda: git_action._git_commit(self)),
-            ("Git Push", lambda: git_action._git_push(self)),
-        ]
-        for label, command in git_actions:
-            git_menu.add_command(label=label, command=command)
-        self.git_actions_dropdown["menu"] = git_menu
-        self.git_actions_dropdown.grid(row=0, column=5, sticky="e", **PADDING)
+        # git_menu = tk.Menu(self.git_actions_dropdown, tearoff=0)
+        # git_actions = [
+        #     ("Git Pull", lambda: git_action._git_pull(self)),
+        #     (
+        #         "Git Commit & Push",
+        #         lambda: (git_action._git_commit(self), git_action._git_push(self)),
+        #     ),
+        #     ("Git Commit", lambda: git_action._git_commit(self)),
+        #     ("Git Push", lambda: git_action._git_push(self)),
+        # ]
+        # for label, command in git_actions:
+        #     git_menu.add_command(label=label, command=command)
+        # self.git_actions_dropdown["menu"] = git_menu
+        # self.git_actions_dropdown.grid(row=0, column=5, sticky="e", **PADDING)
 
         # Server controls
         work_frame = ttk.LabelFrame(self, text="Work")
