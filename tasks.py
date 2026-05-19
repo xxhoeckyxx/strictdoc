@@ -83,6 +83,16 @@ def run_invoke_with_tox(
     )
 
 
+def remove_path_if_exists(path: str) -> None:
+    path_object = Path(path)
+    if not path_object.exists():
+        return
+    if path_object.is_dir():
+        shutil.rmtree(path_object, ignore_errors=True)
+    else:
+        path_object.unlink(missing_ok=True)
+
+
 @task(default=True)
 def list_tasks(context):
     clean_command = """
@@ -92,12 +102,9 @@ def list_tasks(context):
 
 
 @task
-def clean(context):
-    # https://unix.stackexchange.com/a/689930/77389
-    clean_command = """
-        rm -rf output/ docs/sphinx/build/
-    """
-    run_invoke(context, clean_command)
+def clean(_context):
+    remove_path_if_exists("output")
+    remove_path_if_exists("docs/sphinx/build")
 
 
 @task(aliases=["s"])
@@ -479,22 +486,8 @@ def test_integration(
         test_folder = f"{cwd}/tests/integration/features/html2pdf"
         test_output_dir = "build/tests_integration_html2pdf"
 
-    # The command sometimes exits with 1 even if the files are deleted.
-    # warn=True ensures that the execution continues.
-    run_invoke(
-        context,
-        f"""
-        rm -rf {test_output_dir}
-        """,
-        warn=True,
-    )
-
-    run_invoke(
-        context,
-        f"""
-        rm -rf {STRICTDOC_TMP_DIR}
-        """,
-    )
+    remove_path_if_exists(test_output_dir)
+    remove_path_if_exists(STRICTDOC_TMP_DIR)
 
     Path(STRICTDOC_TMP_DIR).mkdir(exist_ok=True)
     Path(TEST_REPORTS_DIR).mkdir(parents=True, exist_ok=True)
