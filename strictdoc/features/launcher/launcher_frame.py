@@ -40,6 +40,7 @@ else:
 
 class StrictDocLauncher(tk.Tk):
     help_links = {
+        "Quick Start StrictDoc": "https://legrisind.sharepoint.com/:w:/s/SW-ProductDevelopment/IQBPD_N2sMNWSov8JmVJ3UY9AY0oLi-F_oRRQqwmbN5kwIs?e=avVGpx",
         "User Guide StrictDoc": "https://strictdoc.readthedocs.io/en/stable/stable/docs/strictdoc_01_user_guide.html",
         "User Guide RST docutils": "https://docutils.sourceforge.io/docs/ref/rst/directives.html",
         "User Guide RST sphinx": "https://sphinx-tutorial.readthedocs.io/step-1/",
@@ -300,13 +301,21 @@ class StrictDocLauncher(tk.Tk):
         )
         self.server_btn.grid(row=0, column=0, sticky="w", **PADDING)
 
+        self.reload_btn = ttk.Button(
+            work_frame,
+            text="Reload Server",
+            command=self._reload_server,
+            state="disabled",
+        )
+        self.reload_btn.grid(row=0, column=1, sticky="w", **PADDING)
+
         self.open_browser_btn = ttk.Button(
             work_frame,
             text="Open Browser",
             command=self.open_browser,
             state="disabled",
         )
-        self.open_browser_btn.grid(row=0, column=1, sticky="w", **PADDING)
+        self.open_browser_btn.grid(row=0, column=2, sticky="w", **PADDING)
 
         # Auto-open browser option. Use a BooleanVar so checking the box
         # only sets the preference — it must not immediately open the browser.
@@ -319,7 +328,7 @@ class StrictDocLauncher(tk.Tk):
             offvalue=False,
             command=self._on_auto_open_browser_changed,
         )
-        self.auto_open_browser.grid(row=0, column=2, sticky="w", **PADDING)
+        self.auto_open_browser.grid(row=0, column=3, sticky="w", **PADDING)
 
         # Help/documentation chooser: show a small '?' Menubutton on the
         # right side of the work frame that opens a menu with links.
@@ -346,7 +355,7 @@ class StrictDocLauncher(tk.Tk):
                 command=_build_open_help_callback(name),
             )
         self.helper_docs_dropdown["menu"] = menu
-        self.helper_docs_dropdown.grid(row=0, column=3, sticky="e", **PADDING)
+        self.helper_docs_dropdown.grid(row=0, column=4, sticky="e", **PADDING)
 
         # Log header row
         log_header_frame = ttk.Frame(self)
@@ -684,6 +693,7 @@ class StrictDocLauncher(tk.Tk):
         self.open_folder_btn.configure(state="disabled")
         self.repair_id_btn.configure(state="disabled")
         self.server_btn.configure(state="disabled")
+        self.reload_btn.configure(state="disabled")
         self.open_browser_btn.configure(state="disabled")
 
         try:
@@ -862,19 +872,27 @@ class StrictDocLauncher(tk.Tk):
 
         def worker() -> None:
             try:
-                completed = subprocess.run(
+                process = subprocess.Popen(
                     cmd,
                     cwd=workspace_dir,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     text=True,
-                    check=False,
+                    bufsize=1,
                 )
+                output_lines: list[str] = []
+                assert process.stdout is not None
+                for line in process.stdout:
+                    output_lines.append(line)
+                    self.after(0, self._append_log, f"[EXPORT] {line}")
 
-                if completed.returncode == 0:
+                return_code = process.wait()
+
+                if return_code == 0:
                     self.after(0, on_success)
                 else:
-                    error_text = completed.stderr or completed.stdout or ""
-                    msg = f"RC={completed.returncode}\n\n{error_text}"
+                    output = "".join(output_lines)
+                    msg = f"RC={return_code}\n\n{output}"
 
                     def _call_on_error_with_msg(
                         error_message: str = msg,
@@ -1434,11 +1452,18 @@ class StrictDocLauncher(tk.Tk):
     def _set_server_running_ui(self) -> None:
         """Disable config/workspace changes while the server is running."""
 
-        self.server_btn.configure(text="Stop server", style="red.TButton")
-        self.open_browser_btn.configure(state="disabled", style="green.TButton")
+        self.server_btn.configure(
+            state="normal", text="Stop server", style="red.TButton"
+        )
+        self.reload_btn.configure(
+            state="normal" if self._server_ready else "disabled"
+        )
+        self.open_browser_btn.configure(
+            state="normal" if self._server_ready else "disabled",
+            style="green.TButton",
+        )
         self.auto_open_browser.configure(state="disabled")
         self.export_btn.configure(state="disabled")
-        self._server_ready = False
 
         # Lock all controls that would modify project layout/config
         # while the server is active.
@@ -1451,7 +1476,10 @@ class StrictDocLauncher(tk.Tk):
     def _set_server_stopped_ui(self) -> None:
         """Re-enable config/workspace controls when server is stopped."""
 
-        self.server_btn.configure(text="Start server", style="green.TButton")
+        self.server_btn.configure(
+            state="normal", text="Start server", style="green.TButton"
+        )
+        self.reload_btn.configure(state="disabled")
         self.open_browser_btn.configure(state="disabled", style="red.TButton")
         self.auto_open_browser.configure(state="normal")
         self.export_btn.configure(state="normal")
@@ -1472,6 +1500,46 @@ class StrictDocLauncher(tk.Tk):
         else:
             # Server is not running -> start it.
             self.start_server()
+
+    def _reload_server(self) -> None:
+        """Stop the running server and start it again."""
+
+        if not self._is_server_running():
+            self._set_server_stopped_ui()
+            self.set_status("Server is not running.")
+            return
+
+        if not self._ensure_workspace():
+            return
+
+        self._append_log("[RELOAD] Restarting server.\n")
+        self.set_status("Reloading server...")
+        self.stop_server()
+        self.start_server()
+
+    def _refresh_browser(self) -> None:
+        """Open a fresh browser URL after rebuilding the HTML output."""
+        if not self._server_ready:
+            return
+
+        import time
+
+        url = (
+            f"http://{self.server_host}:{self.server_port}/"
+            f"?reload={int(time.time())}"
+        )
+
+        try:
+            webbrowser.open(url)
+
+            self._append_log(
+                f"[BROWSER] Opened refreshed URL: {url}\n"
+            )
+
+        except Exception as exc:
+            self._append_log(
+                f"[BROWSER ERROR] {exc}\n"
+            )
 
     def _toggle_log(self) -> None:
         """
@@ -1693,6 +1761,7 @@ class StrictDocLauncher(tk.Tk):
             threading.Thread(target=run_server, daemon=True).start()
 
             # Update button/controls: now in "running" state.
+            self._server_ready = False
             self._set_server_running_ui()
             self.set_status("Server started (see terminal for logs).")
         except Exception as exc:  # noqa: BLE001
@@ -1804,6 +1873,7 @@ class StrictDocLauncher(tk.Tk):
         )
         if any(marker in normalized for marker in ready_markers):
             self._server_ready = True
+            self.reload_btn.configure(state="normal")
             self.open_browser_btn.configure(
                 state="normal", style="green.TButton"
             )

@@ -68,6 +68,7 @@ class TraceabilityIndex:
         self.validation_index: ValidationIndex = ValidationIndex()
         self.graph_database: GraphDatabase = graph_database
         self.document_tree: DocumentTree = document_tree
+        self.test_report_documents: List[SDocDocument] = []
         self.asset_manager: Optional[AssetManager] = None
         self.file_dependency_manager: FileDependencyManager = (
             file_dependency_manager

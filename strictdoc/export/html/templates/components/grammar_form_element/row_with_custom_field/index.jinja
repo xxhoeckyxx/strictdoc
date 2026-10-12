@@ -7,7 +7,10 @@
 {% block row_form_attributes %}
 {% endblock row_form_attributes %}
 
+
 {% block row_left %}
+
+  {# Move down #}
   {%- set action_button_context = namespace() %}
   {%- set action_button_context.field_actions = {"move_down": true} %}
   {%- set action_button_context.field_name = form_object.field.field_name %}
@@ -16,6 +19,7 @@
   {%- set action_button_context.testid_postfix = "custom-field" %}
   {%- include "components/form/field_action_button/index.jinja" -%}
 
+  {# Move up #}
   {%- set action_button_context = namespace() %}
   {%- set action_button_context.field_actions = {"move_up": true} %}
   {%- set action_button_context.field_name = form_object.field.field_name %}
@@ -23,60 +27,183 @@
   {%- set action_button_context.mid = form_object.field.field_mid %}
   {%- set action_button_context.testid_postfix = "custom-field" %}
   {%- include "components/form/field_action_button/index.jinja" -%}
+
 {% endblock row_left %}
+
 
 {% block row_content scoped %}
 
-{%- set _name_errors = form_object.get_errors(form_object.field.get_input_field_name()) %}
-{%- set _human_name_errors = form_object.get_errors(form_object.field.get_input_field_human_title()) %}
-<sdoc-form-field-group
-  data-field-label="Custom field"
-  {% if _name_errors|length or _human_name_errors|length -%}
-    errors="true"
-  {%- endif -%}
->
+  {# ------------------------------------------------------------ #}
+  {# Errors                                                      #}
+  {# ------------------------------------------------------------ #}
 
-  {# FIXME: This will become a proper checkbox field eventually. #}
-  <input
-    type="hidden"
-    value="{{ form_object.field.get_input_field_required_value() }}"
-    name="{{ form_object.field.get_input_field_required() }}"
-  />
+  {%- set name_input_name = form_object.field.get_input_field_name() %}
+  {%- set human_title_input_name = form_object.field.get_input_field_human_title() %}
+  {%- set options_input_name = form_object.field.get_input_field_options() %}
+  {%- set type_input_name = form_object.field.get_input_field_type() %}
+  {%- set required_input_name = form_object.field.get_input_field_required() %}
 
-  {%- set placeholder_name = form_object.field.field_name|default('custom field name', true) %}
-  {# field_placeholder = "Enter "~placeholder_name~" here...", #}
-  {%- with
-    field_class_name = "monospace",
-    field_editable = true,
-    field_required = form_object.field.field_required,
-    field_input_name = form_object.field.get_input_field_name(),
-    field_label = "Field name",
-    field_placeholder = "Enter field name here...",
-    field_type = "singleline",
-    field_value = form_object.field.field_name,
-    mid = form_object.field.field_mid,
-    testid_postfix = "reserved_field_name",
-    errors = _name_errors
-  %}
-    {%- include "components/form/field/contenteditable/index.jinja" %}
-  {%- endwith -%}
-  {%- set human_title_value = form_object.field.field_human_title if form_object.field.field_human_title else "" -%}
-  {%- with
-    field_class_name = "monospace",
-    field_editable = true,
-    field_required = false,
-    field_input_name = form_object.field.get_input_field_human_title(),
-    field_label = "Field human name",
-    field_placeholder = "Enter human readable field name here...",
-    field_type = "singleline",
-    field_value = human_title_value,
-    mid = form_object.field.field_mid,
-    testid_postfix = "reserved_field_human_title",
-    errors = _human_name_errors
-  %}
-    {%- include "components/form/field/contenteditable/index.jinja" %}
-  {%- endwith -%}
-</sdoc-form-field-group>
+  {%- set name_errors = form_object.get_errors(name_input_name) %}
+  {%- set human_name_errors = form_object.get_errors(human_title_input_name) %}
+  {%- set options_errors = form_object.get_errors(options_input_name) %}
+
+
+  <sdoc-form-field-group
+    data-field-label="Custom field"
+    data-custom-field="true"
+    data-field-mid="{{ form_object.field.field_mid }}"
+    {% if name_errors|length or human_name_errors|length or options_errors|length %}
+      errors="true"
+    {% endif %}
+  >
+
+    {# ---------------------------------------------------------- #}
+    {# Required                                                   #}
+    {# ---------------------------------------------------------- #}
+
+    {# FIXME:
+       Currently this is a hidden field.
+       Replace with a real checkbox when the UI supports editing
+       the required state.
+    #}
+
+    <input
+      type="hidden"
+      name="{{ required_input_name }}"
+      value="{{ form_object.field.get_input_field_required_value() }}"
+    />
+
+
+    {# ---------------------------------------------------------- #}
+    {# Field type                                                  #}
+    {# ---------------------------------------------------------- #}
+
+    <label for="field_type_{{ form_object.field.field_mid }}">
+      Field type
+    </label>
+
+    <select
+      id="field_type_{{ form_object.field.field_mid }}"
+      class="sdoc-form-select"
+      name="{{ type_input_name }}"
+      data-custom-field-type
+      aria-controls="field_options_{{ form_object.field.field_mid }}"
+    >
+      <option
+        value="String"
+        {% if form_object.field.field_type == "String" %}selected{% endif %}
+      >
+        String
+      </option>
+
+      <option
+        value="SingleChoice"
+        {% if form_object.field.field_type == "SingleChoice" %}selected{% endif %}
+      >
+        SingleChoice
+      </option>
+
+      <option
+        value="MultipleChoice"
+        {% if form_object.field.field_type == "MultipleChoice" %}selected{% endif %}
+      >
+        MultipleChoice
+      </option>
+
+      <option
+        value="Tag"
+        {% if form_object.field.field_type == "Tag" %}selected{% endif %}
+      >
+        Tag
+      </option>
+    </select>
+
+
+    {# ---------------------------------------------------------- #}
+    {# Options                                                     #}
+    {# ---------------------------------------------------------- #}
+
+    <div
+      id="field_options_{{ form_object.field.field_mid }}"
+      class="sdoc-form-field-options"
+      data-custom-field-options
+      {% if form_object.field.field_type not in ["SingleChoice", "MultipleChoice"] %}
+        hidden
+      {% endif %}
+    >
+
+      {%- with
+        field_class_name = "monospace",
+        field_editable = true,
+        field_required = false,
+        field_input_name = options_input_name,
+        field_label = "Options",
+        field_placeholder = "A, B, C",
+        field_type = "singleline",
+        field_value = form_object.field.field_options|default("", true),
+        mid = form_object.field.field_mid,
+        testid_postfix = "field_options",
+        errors = options_errors
+      %}
+
+        {%- include "components/form/field/contenteditable/index.jinja" %}
+
+      {%- endwith -%}
+
+    </div>
+
+
+    {# ---------------------------------------------------------- #}
+    {# Field name                                                  #}
+    {# ---------------------------------------------------------- #}
+
+    {%- with
+      field_class_name = "monospace",
+      field_editable = true,
+      field_required = form_object.field.field_required,
+      field_input_name = name_input_name,
+      field_label = "Field name",
+      field_placeholder = "Enter field name here...",
+      field_type = "singleline",
+      field_value = form_object.field.field_name|default("", true),
+      mid = form_object.field.field_mid,
+      testid_postfix = "reserved_field_name",
+      errors = name_errors
+    %}
+
+      {%- include "components/form/field/contenteditable/index.jinja" %}
+
+    {%- endwith -%}
+
+
+    {# ---------------------------------------------------------- #}
+    {# Human readable field name                                  #}
+    {# ---------------------------------------------------------- #}
+
+    {%- set human_title_value =
+      form_object.field.field_human_title|default("", true)
+    -%}
+
+    {%- with
+      field_class_name = "monospace",
+      field_editable = true,
+      field_required = false,
+      field_input_name = human_title_input_name,
+      field_label = "Field human name",
+      field_placeholder = "Enter human readable field name here...",
+      field_type = "singleline",
+      field_value = human_title_value,
+      mid = form_object.field.field_mid,
+      testid_postfix = "reserved_field_human_title",
+      errors = human_name_errors
+    %}
+
+      {%- include "components/form/field/contenteditable/index.jinja" %}
+
+    {%- endwith -%}
+
+  </sdoc-form-field-group>
+
 {% endblock row_content %}
 
 {% block row_right %}
@@ -86,6 +213,7 @@
   {%- set action_button_context.field_name = "custom field" %}
   {%- set action_button_context.mid = form_object.field.field_mid %}
   {%- set action_button_context.testid_postfix = "custom-field" %}
+
   {%- include "components/form/field_action_button/index.jinja" -%}
 
 {% endblock row_right %}

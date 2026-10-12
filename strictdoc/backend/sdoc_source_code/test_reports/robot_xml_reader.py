@@ -21,6 +21,36 @@ from strictdoc.core.project_config import ProjectConfig
 from strictdoc.helpers.paths import path_to_posix_path
 
 
+def normalize_robot_status(status: str) -> str:
+    return {
+        "PASS": "PASSED",
+        "FAIL": "FAILED",
+    }.get(status.upper(), status.upper())
+
+def extract_statement_from_doc(doc: str) -> str:
+    """
+    Extrahiert die eigentliche Testbeschreibung aus dem Robot-Dokument.
+
+    Relation-Marker werden aus der Beschreibung entfernt.
+    Alle anderen Zeilen bilden das STATEMENT.
+    """
+
+    if not doc:
+        return ""
+
+    statement_lines = []
+
+    for line in doc.splitlines():
+        stripped_line = line.strip()
+
+        if stripped_line.startswith("@relation("):
+            continue
+
+        statement_lines.append(line)
+
+    return "\n".join(statement_lines).strip()
+
+
 class SdocVisitor(ResultVisitor):  # type: ignore[misc]
     def __init__(self, project_config: ProjectConfig):
         self.project_config = project_config
@@ -90,6 +120,9 @@ class SdocVisitor(ResultVisitor):  # type: ignore[misc]
         testcase_node.ng_document_reference.set_document(self.document)
         testcase_node.ng_including_document_reference = DocumentReference()
 
+        # Robot [Documentation] wird als STATEMENT übernommen.
+        statement_value = extract_statement_from_doc(test.doc or "")
+
         # Only executed tests will become traceable.
         if not test.skipped:
             testcase_node.set_field_value(
@@ -105,8 +138,9 @@ class SdocVisitor(ResultVisitor):  # type: ignore[misc]
 
         # Absolute path will be replaced with relative path to strictdoc root
         # in FileTraceabilityIndex.
-        abs_path_on_exec_machine = path_to_posix_path(str(test.source))
         if test.source is not None:
+            abs_path_on_exec_machine = path_to_posix_path(str(test.source))
+
             testcase_node.set_field_value(
                 field_name="TEST_PATH",
                 form_field_index=0,
@@ -130,6 +164,17 @@ class SdocVisitor(ResultVisitor):  # type: ignore[misc]
         )
 
         testcase_node.set_field_value(
+            field_name="STATEMENT",
+            form_field_index=0,
+            value=SDocNodeField(
+                parent=testcase_node,
+                field_name="STATEMENT",
+                parts=[statement_value],
+                multiline__="True",
+            ),
+        )
+
+        testcase_node.set_field_value(
             field_name="DURATION",
             form_field_index=0,
             value=SDocNodeField(
@@ -146,7 +191,7 @@ class SdocVisitor(ResultVisitor):  # type: ignore[misc]
             value=SDocNodeField(
                 parent=testcase_node,
                 field_name="STATUS",
-                parts=[test.status],
+                parts=[normalize_robot_status(test.status)],
                 multiline__=None,
             ),
         )

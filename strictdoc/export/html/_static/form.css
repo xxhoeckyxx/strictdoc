@@ -440,10 +440,42 @@ sdoc-form-field select {
   z-index: 1;
   /* Remove focus outline, will add on alternate element */
   outline: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--color-placeholder) 50%),
+    linear-gradient(135deg, var(--color-placeholder) 50%, transparent 50%);
+  background-position:
+    calc(100% - 16px) calc(50% - 2px),
+    calc(100% - 11px) calc(50% - 2px);
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-sdoc-form-field select:focus {
-  border: 1px solid var(--color-fg-accent);
+sdoc-form-field select:focus,
+sdoc-form-field .sdoc-form-select:focus {
+  border-color: var(--color-fg-accent);
+  box-shadow: 0 0 0 3px rgba(61, 98, 235, 0.12);
+}
+
+sdoc-form-field select:disabled,
+sdoc-form-field .sdoc-form-select:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+sdoc-form-field select option,
+sdoc-form-field .sdoc-form-select option {
+  color: var(--color-fg-main);
+  background: var(--color-bg-contrast);
+}
+
+.sdoc-form-field-options {
+  width: 100%;
+  display: block;
+}
+
+.sdoc-form-field-options[hidden] {
+  display: none;
 }
 
 /* Remove dropdown arrow in IE10 & IE11

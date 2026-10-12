@@ -67,8 +67,14 @@ class SourceFilesFinder:
                 output_dir_full_path,
                 output_file_full_path,
             )
-            found_source_files.append(source_file)
             map_file_to_source[file] = source_file
+
+            """ if file.full_path.endswith(".junit.xml") or file.full_path.endswith(
+                ".robot.xml"
+            ):
+                continue """
+
+            found_source_files.append(source_file)
 
         source_tree = SourceTree(
             file_tree, found_source_files, map_file_to_source

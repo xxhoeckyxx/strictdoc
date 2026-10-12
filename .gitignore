@@ -3,6 +3,7 @@
 /.direnv/
 /.vscode/
 /build/
+/dist/
 /developer/tasks/**/Context.md
 /developer/**/_draft/
 /reports/

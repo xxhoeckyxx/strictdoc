@@ -35,5 +35,10 @@
 {% endblock row_content %}
 
 {% block row_right %}
-{# Explicitly nothing. #}
+  {%- set action_button_context = namespace() %}
+  {%- set action_button_context.field_actions = {"delete": true} %}
+  {%- set action_button_context.field_name = "grammar element" %}
+  {%- set action_button_context.mid = form_object.field.field_mid %}
+  {%- set action_button_context.testid_postfix = "grammar-element" %}
+  {%- include "components/form/field_action_button/index.jinja" -%}
 {% endblock row_right %}

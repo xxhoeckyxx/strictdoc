@@ -30,6 +30,7 @@ def create_config() -> ProjectConfig:
         ],
         exclude_doc_paths=[
             "/.*/",
+            "/docs/sphinx/",
             "/strictdoc/",
             "/tests/",
         ],
@@ -43,6 +44,7 @@ def create_config() -> ProjectConfig:
             "/tests/integration/**itest",
             "/tests/unit/**.py",
             "/tests/unit_server/**.py",
+            "/tests/unit_server/strictdoc/server/tree_map/**.junit.xml",
             "/tests/end2end/**.py",
             "/tasks.py",
             "/pyproject.toml",

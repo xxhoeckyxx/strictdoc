@@ -349,13 +349,6 @@ def create_main_router(
     def write_document_to_file(document: SDocDocument) -> None:
         """
         FIXME: Factorize this into an OOP class.
-
-        FIXME: The writer dispatch below is hardcoded to ".md"/".markdown"
-        vs. everything else, not derived from project_config.formats /
-        Format.supports_edit(). Document creation now accepts any editable
-        format's extension (see ProjectConfig.get_editable_document_extensions()),
-        so a third editable format would pass creation validation but get
-        silently mis-written here.
         """
 
         assert isinstance(document, SDocDocument)
@@ -3440,12 +3433,12 @@ def create_main_router(
         )
 
     @write_router.post(
-        "/actions/project_index/create_document", response_class=Response
+    "/actions/project_index/create_document", response_class=HTMLResponse
     )
     def document_tree__create_document(
         document_title: str = Form(""),
         document_path: str = Form(""),
-    ) -> Response:
+    ) -> HTMLResponse:
         """
         @relation(SDOC-SRS-107, scope=function)
         """
@@ -3461,7 +3454,12 @@ def create_main_router(
             )
         else:
             document_path = document_path.strip().lstrip("/")
-            if not is_safe_alphanumeric_string(document_path):
+        
+            # CORRECTION: Allows slashes by checking each folder component individually
+            path_parts = document_path.split("/")
+            is_valid_path = all(is_safe_alphanumeric_string(part) for part in path_parts if part)
+            
+            if not is_valid_path:
                 error_object.add_error(
                     "document_path",
                     (
@@ -5481,7 +5479,12 @@ def create_main_router(
             async with self._lock:
                 connections = list(self.active_connections)
             for connection in connections:
-                await connection.send_text(message)
+                try:
+                    await connection.send_text(message)
+                except Exception:
+                    async with self._lock:
+                        if connection in self.active_connections:
+                            self.active_connections.remove(connection)
 
     manager = ConnectionManager()
 

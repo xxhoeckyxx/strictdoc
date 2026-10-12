@@ -38,11 +38,17 @@ from strictdoc.backend.sdoc.validations.sdoc_validator import SDocValidator
 from strictdoc.backend.sdoc_source_code.caching_reader import (
     SourceFileTraceabilityCachingReader,
 )
+from strictdoc.backend.sdoc_source_code.test_reports.reader_registry import (
+    TestReportReaderRegistry,
+)
 from strictdoc.core.constants import GraphLinkType
 from strictdoc.core.document_iterator import SDocDocumentIterator
 from strictdoc.core.document_tree import DocumentTree
 from strictdoc.core.file_dependency_manager import FileDependencyManager
 from strictdoc.core.file_system.document_finder import DocumentFinder
+from strictdoc.core.file_system.test_report_files_finder import (
+    TestReportFilesFinder,
+)
 from strictdoc.core.file_system.source_files_finder import (
     SourceFilesFinder,
 )
@@ -140,6 +146,23 @@ class TraceabilityIndexBuilder:
         )
         traceability_index.asset_manager = asset_manager
         traceability_index.strictdoc_last_update = strictdoc_last_update
+
+        test_report_documents: List[SDocDocument] = []
+        with measure_performance("Find test report files"):
+            test_report_files = TestReportFilesFinder.find_test_report_files(
+                project_config=project_config
+            )
+
+        for test_report_file in test_report_files:
+            with measure_performance(
+                f"Reading test report: {os.path.basename(test_report_file.full_path)}"
+            ):
+                test_report_document = TestReportReaderRegistry.read_from_file(
+                    test_report_file, project_config
+                )
+                test_report_documents.append(test_report_document)
+
+        traceability_index.test_report_documents = test_report_documents
 
         if node_filter_query := project_config.filter_nodes:
             traceability_index.node_filter = cls._create_filter(
