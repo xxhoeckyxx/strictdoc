@@ -114,9 +114,25 @@ def test_export_09_config():
     parser = cli_args_parser()
 
     args = parser.parse_args(
-        ["export", "docs", "--config", "/path/to/strictdoc.toml"]
+        ["export", "docs", "--config", "/path/to/strictdoc_config.py"]
     )
     assert args.command == "export"
+
+
+def test_export_10_disable_ssl_check_default_false():
+    parser = cli_args_parser()
+    args = parser.parse_args(["export", "docs"])
+
+    assert args.command == "export"
+    assert args.disable_ssl_check is False
+
+
+def test_export_11_disable_ssl_check_enabled():
+    parser = cli_args_parser()
+    args = parser.parse_args(["export", "docs", "--disable-ssl-check"])
+
+    assert args.command == "export"
+    assert args.disable_ssl_check is True
 
 
 def test_new_01_minimal():
@@ -126,3 +142,27 @@ def test_new_01_minimal():
 
     assert args.command == "new"
     assert args.input_path == FAKE_STRICTDOC_ROOT_PATH
+
+
+def test_debug_flag_alone_does_not_imply_development_mode():
+    """Regression: --debug must not, by itself, imply --development."""
+    parser = cli_args_parser()
+    args = parser.parse_args(["--debug", "export", "docs"])
+    sdoc_args_parser = SDocArgsParser(args, COMMAND_REGISTRY)
+
+    assert sdoc_args_parser.is_debug_mode() is True
+    assert sdoc_args_parser.is_development_mode() is False
+
+
+def test_development_flag_sets_development_mode_independently_of_debug():
+    parser = cli_args_parser()
+    args = parser.parse_args(["--development", "export", "docs"])
+    sdoc_args_parser = SDocArgsParser(args, COMMAND_REGISTRY)
+
+    assert sdoc_args_parser.is_debug_mode() is False
+    assert sdoc_args_parser.is_development_mode() is True
+
+
+def test_development_flag_is_hidden_from_help_text():
+    parser = cli_args_parser()
+    assert "--development" not in parser.format_help()

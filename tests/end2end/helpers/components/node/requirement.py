@@ -143,6 +143,23 @@ class Requirement(Node):  # pylint: disable=invalid-name
             by=By.XPATH,
         )
 
+    def assert_requirement_statement_contains_count(
+        self,
+        text: str,
+        count: int,
+    ) -> None:
+        xpath = (
+            f"{self.node_xpath}"
+            "//sdoc-node-field[@data-field-label='statement']"
+            f"//*[normalize-space(.) = '{text}']"
+        )
+        elements = self.test_case.find_elements(xpath, by=By.XPATH)
+        actual = len(elements)
+        assert actual == count, (
+            f"Expected statement to contain '{text}' exactly {count} time(s), "
+            f"but found {actual}."
+        )
+
     def assert_requirement_rationale_contains(
         self,
         text: str,
@@ -198,6 +215,14 @@ class Requirement(Node):  # pylint: disable=invalid-name
             by=By.XPATH,
         )
 
+    def do_click_on_parent_relation_link(self, parent_uid: str) -> None:
+        self.test_case.click_xpath(
+            f"{self.node_xpath}"
+            "//sdoc-node-field[@data-field-label='parent relations']"
+            "//a[contains(@class, 'requirement__link-parent')]"
+            f"[contains(., '{parent_uid}')]"
+        )
+
     # clone
 
     def do_clone_requirement(self) -> Form_EditRequirement:
@@ -250,6 +275,11 @@ class Requirement(Node):  # pylint: disable=invalid-name
         return Screen_Document(self.test_case)
 
     def do_copy_anchor_to_buffer(self) -> None:
+        # The button only appears on a real CSS :hover, so the hover target
+        # must already be on-screen: ActionChains moves the mouse to the
+        # element's current on-page position, it does not scroll for us, and
+        # a prior step in the same test may have scrolled it out of view.
+        self.test_case.sdoc_do_scroll_to_element_by_xpath(self.node_xpath)
         self.test_case.hover_and_click(
             hover_selector=f"{self.node_xpath}",
             click_selector=(
@@ -258,3 +288,101 @@ class Requirement(Node):  # pylint: disable=invalid-name
             hover_by=By.XPATH,
             click_by=By.XPATH,
         )
+
+    def do_copy_rst_anchor_to_buffer(self, anchor_uid: str) -> None:
+        # See do_copy_anchor_to_buffer: the hover target must be on-screen
+        # before hovering, not just present in the DOM.
+        self.test_case.sdoc_do_scroll_to_element_by_xpath(self.node_xpath)
+        self.test_case.hover_and_click(
+            hover_selector=f"{self.node_xpath}",
+            click_selector=(
+                f'//sdoc-anchor[@data-uid="{anchor_uid}"]'
+                '//*[@data-testid="section-anchor-button"]'
+            ),
+            hover_by=By.XPATH,
+            click_by=By.XPATH,
+        )
+
+    def do_copy_field_content_to_buffer(
+        self, field_label: str = "statement"
+    ) -> None:
+        field_xpath = (
+            f"{self.node_xpath}"
+            f'//sdoc-node-field[@data-field-label="{field_label}"]'
+            "//sdoc-field"
+        )
+        # See do_copy_anchor_to_buffer: the hover target must be on-screen
+        # before hovering, not just present in the DOM.
+        self.test_case.sdoc_do_scroll_to_element_by_xpath(field_xpath)
+        self.test_case.hover_and_click(
+            hover_selector=field_xpath,
+            click_selector=(
+                f"{self.node_xpath}"
+                f'//sdoc-node-field[@data-field-label="{field_label}"]'
+                "//div[contains(@class,'copy_to_clipboard-button')]"
+            ),
+            hover_by=By.XPATH,
+            click_by=By.XPATH,
+        )
+
+    def do_copy_stable_link_to_buffer(self) -> None:
+        # See do_copy_anchor_to_buffer: the hover target must be on-screen
+        # before hovering, not just present in the DOM.
+        self.test_case.sdoc_do_scroll_to_element_by_xpath(self.node_xpath)
+        self.test_case.hover_and_click(
+            hover_selector=f"{self.node_xpath}",
+            click_selector=(
+                f"{self.node_xpath}"
+                "//*[contains(@class,'copy_stable_link-button')]"
+            ),
+            hover_by=By.XPATH,
+            click_by=By.XPATH,
+        )
+
+    def _assert_action_is_locked(self, testid: str):
+        """Verifies the action identified by testid is locked."""
+        self.test_case.assert_element_absent(
+            f"{self.node_xpath}//sdoc-node-controls//*[@data-testid='{testid}']",
+            by=By.XPATH,
+        )
+        action_btn_class = self.test_case.get_attribute(
+            f"{self.node_xpath}//sdoc-node-controls//*[@data-testid='{testid}-disabled']",
+            "class",
+            by=By.XPATH,
+        )
+        assert "action_button--disabled" in action_btn_class
+
+    def _assert_action_is_unlocked(self, testid: str):
+        """Verifies the action identified by testid is unlocked."""
+        self.test_case.assert_element_present(
+            f"{self.node_xpath}//sdoc-node-controls//*[@data-testid='{testid}']",
+            by=By.XPATH,
+        )
+        self.test_case.assert_element_absent(
+            f"{self.node_xpath}//sdoc-node-controls//*[@data-testid='{testid}-disabled']",
+            by=By.XPATH,
+        )
+
+    def assert_add_action_is_locked(self):
+        self._assert_action_is_locked("node-menu-handler")
+
+    def assert_add_action_is_unlocked(self):
+        self._assert_action_is_unlocked("node-menu-handler")
+
+    def assert_edit_node_action_is_locked(self):
+        self._assert_action_is_locked("node-edit-action")
+
+    def assert_edit_node_action_is_unlocked(self):
+        self._assert_action_is_unlocked("node-edit-action")
+
+    def assert_clone_node_action_is_locked(self):
+        self._assert_action_is_locked("node-clone-action")
+
+    def assert_clone_node_action_is_unlocked(self):
+        self._assert_action_is_unlocked("node-clone-action")
+
+    def assert_delete_node_action_is_locked(self):
+        self._assert_action_is_locked("node-delete-action")
+
+    def assert_delete_node_action_is_unlocked(self):
+        self._assert_action_is_unlocked("node-delete-action")

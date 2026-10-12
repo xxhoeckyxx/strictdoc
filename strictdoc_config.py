@@ -1,4 +1,4 @@
-from strictdoc.core.project_config import ProjectConfig
+from strictdoc.api import ProjectConfig
 
 
 def create_config() -> ProjectConfig:
@@ -13,7 +13,6 @@ def create_config() -> ProjectConfig:
             "DEEP_TRACEABILITY_SCREEN",
             "SEARCH",
             # Stable features but not used by StrictDoc.
-            # "MATHJAX"
             # Experimental features.
             "PROJECT_STATISTICS_SCREEN",
             "TREE_MAP_SCREEN",
@@ -26,12 +25,11 @@ def create_config() -> ProjectConfig:
         ],
         include_doc_paths=[
             "/docs/",
-            "/docs_extra/",
             "/reports/",
+            "/spec/",
         ],
         exclude_doc_paths=[
             "/.*/",
-            "/docs/sphinx/",
             "/strictdoc/",
             "/tests/",
         ],
@@ -68,8 +66,10 @@ def create_config() -> ProjectConfig:
             "reports/tests_integration.lit.junit.xml": "tests/integration",
             "reports/tests_integration_html2pdf.lit.junit.xml": "tests/integration",
         },
+        document_line_width=80,
         # Waiting for a fix to be released soon.
         html2pdf_strict=False,
+        launcher_logo_path=None,
         reqif_multiline_is_xhtml=True,
         reqif_enable_mid=True,
         section_behavior="[[SECTION]]",

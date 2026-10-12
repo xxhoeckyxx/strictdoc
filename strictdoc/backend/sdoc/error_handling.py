@@ -39,6 +39,7 @@ def get_textx_syntax_error_message(exception: TextXSyntaxError) -> str:
 class StrictDocSemanticError(StrictDocException):
     def __init__(
         self,
+        *,
         title: str,
         hint: Optional[str],
         example: Optional[str],
@@ -401,6 +402,79 @@ ELEMENTS:
             example=None,
             line=1,
             col=1,
+            filename=path_to_sdoc_file,
+        )
+
+    @staticmethod
+    def grammar_relation_reverse_role_without_role(
+        grammar_element: GrammarElement,
+        relation_type: str,
+        reverse_relation_role: str,
+        path_to_sdoc_file: str,
+    ) -> "StrictDocSemanticError":
+        return StrictDocSemanticError(
+            title=(
+                f"Grammar element '{grammar_element.tag}' defines "
+                f"REVERSE_ROLE without ROLE for relation type '{relation_type}'."
+            ),
+            hint=(
+                "REVERSE_ROLE can only be used for a specialized relation "
+                "that also defines ROLE."
+            ),
+            example=(
+                "RELATIONS:\n"
+                f"- TYPE: {relation_type}\n"
+                "  ROLE: Refines\n"
+                f"  REVERSE_ROLE: {reverse_relation_role}\n"
+            ),
+            line=grammar_element.ng_line_start,
+            col=grammar_element.ng_col_start,
+            filename=path_to_sdoc_file,
+        )
+
+    @staticmethod
+    def text_element_must_not_be_composite(
+        grammar_element: GrammarElement,
+        path_to_sdoc_file: str,
+    ) -> "StrictDocSemanticError":
+        return StrictDocSemanticError(
+            title="The TEXT grammar element must not be declared as composite.",
+            hint=(
+                "TEXT nodes cannot have nested children, so "
+                "PROPERTIES/IS_COMPOSITE must be False or omitted for TEXT."
+            ),
+            example="""\
+- TAG: TEXT
+  PROPERTIES:
+    IS_COMPOSITE: False
+  FIELDS:
+  ...
+""",
+            line=grammar_element.ng_line_start,
+            col=grammar_element.ng_col_start,
+            filename=path_to_sdoc_file,
+        )
+
+    @staticmethod
+    def section_element_must_be_composite(
+        grammar_element: GrammarElement,
+        path_to_sdoc_file: str,
+    ) -> "StrictDocSemanticError":
+        return StrictDocSemanticError(
+            title="The SECTION grammar element must be declared as composite.",
+            hint=(
+                "SECTION nodes always nest children, so "
+                "PROPERTIES/IS_COMPOSITE must be True for SECTION."
+            ),
+            example="""\
+- TAG: SECTION
+  PROPERTIES:
+    IS_COMPOSITE: True
+  FIELDS:
+  ...
+""",
+            line=grammar_element.ng_line_start,
+            col=grammar_element.ng_col_start,
             filename=path_to_sdoc_file,
         )
 

@@ -1,6 +1,48 @@
 import os
 import platform
 import sys
+from typing import List
+
+#
+# HTML templates.
+#
+HTML_TEMPLATES_DIR = os.path.join("strictdoc", "export", "html", "templates")
+HTML_TEMPLATE_DIRS = [
+    HTML_TEMPLATES_DIR,
+    os.path.join("strictdoc", "features", "deep_trace", "templates"),
+    os.path.join("strictdoc", "features", "diff_and_changelog", "templates"),
+    os.path.join("strictdoc", "features", "html2pdf", "templates"),
+    os.path.join("strictdoc", "features", "nestor", "templates"),
+    os.path.join("strictdoc", "features", "project_index", "templates"),
+    os.path.join("strictdoc", "features", "project_statistics", "templates"),
+    os.path.join("strictdoc", "features", "search", "templates"),
+    os.path.join("strictdoc", "features", "source_coverage", "templates"),
+    os.path.join("strictdoc", "features", "source_file_view", "templates"),
+    os.path.join("strictdoc", "features", "traceability_matrix", "templates"),
+    os.path.join("strictdoc", "features", "tree_map", "templates"),
+    os.path.join("strictdoc", "features", "trace", "templates"),
+]
+BINARY_HTML_TEMPLATES_DIR = os.path.join("templates", "html")
+
+#
+# HTML static files.
+#
+HTML_STATIC_DIR = os.path.join("strictdoc", "export", "html", "_static")
+HTML_STATIC_DIRS = [
+    HTML_STATIC_DIR,
+    os.path.join("strictdoc", "features", "diff_and_changelog", "assets"),
+    os.path.join("strictdoc", "features", "html2pdf", "assets"),
+    os.path.join("strictdoc", "features", "mathjax", "assets"),
+    os.path.join("strictdoc", "features", "mermaid", "assets"),
+    os.path.join("strictdoc", "features", "nestor", "assets"),
+    os.path.join("strictdoc", "features", "plantuml", "assets"),
+    os.path.join("strictdoc", "features", "project_index", "assets"),
+    os.path.join("strictdoc", "features", "source_coverage", "assets"),
+    os.path.join("strictdoc", "features", "source_file_view", "assets"),
+    os.path.join("strictdoc", "features", "traceability_matrix", "assets"),
+    os.path.join("strictdoc", "features", "tree_map", "assets"),
+]
+BINARY_HTML_STATIC_DIR = "_static"
 
 
 class SDocRuntimeEnvironment:
@@ -47,6 +89,8 @@ class SDocRuntimeEnvironment:
         )
 
         self.is_debug_mode: bool = False
+        self.is_test_env: bool = False
+        self.is_development_mode: bool = False
 
     def is_windows(self) -> bool:
         return platform.system() == "Windows"
@@ -54,19 +98,20 @@ class SDocRuntimeEnvironment:
     def is_github_ci_windows(self) -> bool:
         return self.is_windows() and os.environ.get("GITHUB_ACTIONS") == "true"
 
-    def get_static_files_path(self) -> str:
+    def get_static_files_paths(self) -> List[str]:
         if self.is_binary_dist:  # pragma: no cover
-            return os.path.join(self.path_to_strictdoc, "_static")
-        return os.path.join(
-            self.path_to_strictdoc, "strictdoc/export/html/_static"
-        )
-
-    def get_extra_static_files_path(self) -> str:
-        if self.is_binary_dist:  # pragma: no cover
-            return os.path.join(self.path_to_strictdoc, "_static_extra")
-        return os.path.join(
-            self.path_to_strictdoc, "strictdoc/export/html/_static_extra"
-        )
+            return [
+                os.path.join(self.path_to_strictdoc, BINARY_HTML_STATIC_DIR)
+            ]
+        # Normal Python.
+        static_files_paths = [
+            os.path.join(self.path_to_strictdoc, static_dir)
+            for static_dir in HTML_STATIC_DIRS
+        ]
+        for path in static_files_paths:
+            assert os.path.isdir(path), path
+            assert os.path.isabs(path), path
+        return static_files_paths
 
     def get_path_to_rst_templates(self) -> str:
         if self.is_py_installer:  # pragma: no cover
@@ -81,10 +126,10 @@ class SDocRuntimeEnvironment:
             return os.path.join(self.path_to_strictdoc, "templates/rst")
         # Normal Python
         return os.path.join(
-            self.path_to_strictdoc, "strictdoc", "export", "rst", "templates"
+            self.path_to_strictdoc, "strictdoc", "backend", "rst", "templates"
         )
 
-    def get_path_to_html_templates(self) -> str:
+    def get_path_to_html_templates(self) -> List[str]:
         if self.is_py_installer:  # pragma: no cover
             # If the application is run as a bundle, the PyInstaller bootloader
             # extends the sys module by a flag frozen=True and sets the app
@@ -92,13 +137,17 @@ class SDocRuntimeEnvironment:
             bundle_dir = (
                 sys._MEIPASS  # type: ignore[attr-defined]
             )
-            return os.path.join(bundle_dir, "templates/html")
+            return [os.path.join(bundle_dir, BINARY_HTML_TEMPLATES_DIR)]
         if self.is_nuitka:  # pragma: no cover
-            return os.path.join(self.path_to_strictdoc, "templates/html")
+            return [
+                os.path.join(self.path_to_strictdoc, BINARY_HTML_TEMPLATES_DIR)
+            ]
         # Normal Python.
-        path_to_html_templates = os.path.join(
-            self.path_to_strictdoc, "strictdoc", "export", "html", "templates"
-        )
-        assert os.path.isdir(path_to_html_templates), path_to_html_templates
-        assert os.path.isabs(path_to_html_templates), path_to_html_templates
+        path_to_html_templates = [
+            os.path.join(self.path_to_strictdoc, template_dir)
+            for template_dir in HTML_TEMPLATE_DIRS
+        ]
+        for path in path_to_html_templates:
+            assert os.path.isdir(path), path
+            assert os.path.isabs(path), path
         return path_to_html_templates

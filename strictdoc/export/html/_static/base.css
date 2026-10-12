@@ -4,26 +4,26 @@
 
 :root {
 
-  --color-bg-main: #F2F5F9;
-  --color-fg-main: #444;
+  --color-fg-main: hsl(0, 0%, 22%);
+  --color-bg-main: hsl(0, 0%, 96%);
 
-  --color-bg-contrast: #fff;
-  --color-fg-contrast: #000;
+  --color-bg-ui: hsl(222, 22%, 22%);
+
+  --color-bg-contrast: hsl(0, 0%, 100%);
+  --color-fg-contrast: hsl(0, 0%, 0%);
 
   --color-fg-accent: rgb(242, 100, 42);
   --color-bg-accent: rgb(242 100 42 / 10%);
 
-  --color-accent: #274466;
   --color-highlight: rgb(255, 255, 200);
-  --color-highlight-secondary: rgb(230, 236, 242);
+  --color-highlight-secondary: rgb(233, 233, 233);
+  --color-highlight-danger: rgba(200, 0, 0, .2);
 
   --color-fg-secondary: rgba(0, 0, 0, .5);
   --color-bg-secondary: rgba(0, 0, 0, .025);
 
   --color-fg-secondary-invert: rgb(255 255 255 / 50%);
   --color-bg-secondary-invert: rgb(0 0 0 / 10%);
-
-  --color-bg-ui: #282c42;
 
   --color-red: rgb(200, 0, 0);
   --color-blue: rgb(50, 100, 200);
@@ -58,6 +58,7 @@
   --font-size-xsm: 0.75rem;
   --font-size-xxsm: 11px;
   --code-font-size: .85em;
+  --code-font-size-min: 10px;
 
   --base-font-family: 'Noto Sans', sans-serif;
   --code-font-family: 'Noto Sans Mono', consolas, monaco, monospace;

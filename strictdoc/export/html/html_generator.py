@@ -1,8 +1,7 @@
-import importlib
 import os
-import sys
+import shutil
+import time
 from collections import defaultdict
-from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -12,54 +11,117 @@ from html2pdf4doc import PATH_TO_HTML2PDF4DOC_JS
 from strictdoc.backend.sdoc.models.document import SDocDocument
 from strictdoc.core.asset_manager import AssetDir
 from strictdoc.core.document_meta import DocumentMeta
-from strictdoc.core.file_system.source_tree import SourceTree
+from strictdoc.core.file_system.source_tree import SourceFile, SourceTree
 from strictdoc.core.project_config import ProjectConfig, ProjectFeature
 from strictdoc.core.traceability_index import TraceabilityIndex
 from strictdoc.export.html.document_type import DocumentType
 from strictdoc.export.html.generators.document import DocumentHTMLGenerator
-from strictdoc.export.html.generators.document_deep_trace import (
-    DocumentDeepTraceHTMLGenerator,
-)
-from strictdoc.export.html.generators.document_pdf import (
-    DocumentHTML2PDFGenerator,
-)
 from strictdoc.export.html.generators.document_table import (
     DocumentTableHTMLGenerator,
 )
-from strictdoc.export.html.generators.document_trace import (
-    DocumentTraceHTMLGenerator,
+from strictdoc.export.html.html_templates import (
+    HTMLTemplates,
+    NormalHTMLTemplates,
 )
-from strictdoc.export.html.generators.document_tree import (
-    DocumentTreeHTMLGenerator,
-)
-from strictdoc.export.html.generators.project_map import (
-    ProjectMapGenerator,
-)
-from strictdoc.export.html.generators.project_statistics import (
-    ProgressStatisticsGenerator,
-)
-from strictdoc.export.html.generators.source_file_coverage import (
-    SourceFileCoverageHTMLGenerator,
-)
-from strictdoc.export.html.generators.source_file_view_generator import (
-    SourceFileViewHTMLGenerator,
-)
-from strictdoc.export.html.generators.traceability_matrix import (
-    TraceabilityMatrixHTMLGenerator,
-)
-from strictdoc.export.html.html_templates import HTMLTemplates
 from strictdoc.export.html.renderers.link_renderer import LinkRenderer
 from strictdoc.export.html.renderers.markup_renderer import MarkupRenderer
-from strictdoc.features.tree_map.generator import TreeMapGenerator
+from strictdoc.features.deep_trace.generator import (
+    DocumentDeepTraceHTMLGenerator,
+)
+from strictdoc.features.html2pdf.generator import (
+    DocumentHTML2PDFGenerator,
+)
+from strictdoc.features.project_index.generator import (
+    DocumentTreeHTMLGenerator,
+)
+from strictdoc.features.project_index.project_map_generator import (
+    ProjectMapGenerator,
+)
+from strictdoc.features.source_coverage.generator import (
+    SourceFileCoverageHTMLGenerator,
+)
+from strictdoc.features.source_file_view.generator import (
+    SourceFileViewHTMLGenerator,
+)
+from strictdoc.features.trace.generator import (
+    DocumentTraceHTMLGenerator,
+)
+from strictdoc.features.traceability_matrix.generator import (
+    TraceabilityMatrixHTMLGenerator,
+)
 from strictdoc.helpers.cast import assert_cast
-from strictdoc.helpers.exception import StrictDocException
 from strictdoc.helpers.file_modification_time import get_file_modification_time
 from strictdoc.helpers.file_system import sync_dir
 from strictdoc.helpers.git_client import GitClient
 from strictdoc.helpers.mid import MID
-from strictdoc.helpers.parallelizer import Parallelizer
-from strictdoc.helpers.paths import SDocRelativePath, path_to_posix_path
-from strictdoc.helpers.timing import measure_performance, timing_decorator
+from strictdoc.helpers.parallelizer import Parallelizer, get_worker_context
+from strictdoc.helpers.paths import (
+    SDocRelativePath,
+    path_to_posix_path,
+    shorten_path,
+)
+from strictdoc.helpers.timing import (
+    measure_performance,
+    measure_performance_loop,
+    timing_decorator,
+)
+
+
+def render_favicon_svg(
+    project_config: ProjectConfig,
+    html_templates: HTMLTemplates,  # noqa: ARG001
+) -> str:
+    # Deliberately not using html_templates.jinja_environment(): for large
+    # projects it is a CompiledHTMLTemplates instance that lazily caches a
+    # ModuleLoader-backed Environment (holding unpicklable compiled
+    # _TemplateModule objects) on first call. The HTMLGenerator instance is
+    # sent once to each worker process via the document-export parallelizer's
+    # pool initializer (see export_complete_tree()), so populating that cache
+    # here, in the main process, before parallel export starts, would make
+    # the whole HTMLGenerator (and its html_templates) unpicklable for the
+    # worker pool. A standalone, uncached environment sidesteps that
+    # entirely; favicon.svg.jinja is small enough that skipping template
+    # compilation has no measurable cost.
+    variant = project_config.get_favicon_variant()
+    return (
+        NormalHTMLTemplates()
+        .jinja_environment()
+        .get_template("_shared/favicon.svg.jinja")
+        .render(variant=variant)
+    )
+
+
+def _export_single_document_worker(document_mid: MID) -> Tuple[str, float]:
+    """
+    Module-level (picklable-by-reference) task function for the document
+    export parallelizer. The (HTMLGenerator, TraceabilityIndex) pair is not
+    passed as an argument here: it is sent to each worker process exactly
+    once via run_parallel_with_context()'s pool initializer, instead of
+    being pickled fresh into every submitted document's task.
+
+    Only the document's MID travels per-task, not the SDocDocument object
+    itself: the document is looked up in this worker's own copy of
+    traceability_index instead. Nodes reachable from a document that was
+    pickled separately (e.g. as a direct task argument) would not be the
+    same Python objects as the ones inside the worker's traceability_index
+    (a different, earlier pickle/unpickle of the same content) - and
+    identity-sensitive lookups, such as NodeFilter's blacklist (a plain
+    `set`, hashed/compared by object identity), would then silently fail
+    to recognize them.
+
+    Returns the document's title and export duration instead of printing
+    directly: the caller (running in the main process) reports progress for
+    all documents through a single measure_performance_loop(), which a
+    worker process can't safely share (concurrent in-place progress-line
+    writes from multiple processes would interleave and corrupt the
+    terminal output).
+    """
+    html_generator, traceability_index = get_worker_context()
+    document = traceability_index.get_node_by_mid(document_mid)
+    time_start = time.time()
+    html_generator.export_single_document(document, traceability_index)
+    time_end = time.time()
+    return document.title, time_end - time_start
 
 
 class HTMLGenerator:
@@ -81,21 +143,19 @@ class HTMLGenerator:
         )
 
         # Export assets.
-        HTMLGenerator.export_assets(
-            traceability_index=traceability_index,
+        HTMLGenerator.export_strictdoc_assets(
             project_config=self.project_config,
+            html_templates=self.html_templates,
+            export_output_html_root=self.project_config.export_output_html_root,
+        )
+        HTMLGenerator.export_project_assets(
+            traceability_index=traceability_index,
             export_output_html_root=self.project_config.export_output_html_root,
         )
 
         # Export static search index.
         self.export_static_html_search_index(
             traceability_index=traceability_index
-        )
-
-        # Export all documents in parallel.
-        export_binding = partial(
-            self.export_single_document_with_performance,
-            traceability_index=traceability_index,
         )
 
         # By default, do not export included documents. Only, if the option to
@@ -107,37 +167,52 @@ class HTMLGenerator:
                 traceability_index.document_tree.document_list
             )
         else:
-            for document_ in traceability_index.document_tree.document_list:
-                if document_.document_is_included():
-                    continue
-
-                document_meta = assert_cast(document_.meta, DocumentMeta)
-
-                input_doc_full_path = document_meta.input_doc_full_path
-                output_doc_full_path = document_meta.output_document_full_path
-
-                if os.path.isfile(output_doc_full_path) and (
-                    get_file_modification_time(input_doc_full_path)
-                    < get_file_modification_time(output_doc_full_path)
-                    and not traceability_index.file_dependency_manager.must_generate(
-                        document_meta.output_document_full_path
-                    )
-                ):
-                    with measure_performance(f"Skip: {document_.title}"):
+            with measure_performance_loop(
+                "Skip",
+                len(traceability_index.document_tree.document_list),
+            ) as report_progress:
+                for document_ in traceability_index.document_tree.document_list:
+                    if document_.document_is_included():
                         continue
 
-                documents_to_export.append(document_)
+                    document_meta = assert_cast(document_.meta, DocumentMeta)
+
+                    input_doc_full_path = document_meta.input_doc_full_path
+                    output_doc_full_path = (
+                        document_meta.output_document_full_path
+                    )
+
+                    if os.path.isfile(output_doc_full_path) and (
+                        get_file_modification_time(input_doc_full_path)
+                        < get_file_modification_time(output_doc_full_path)
+                        and not traceability_index.file_dependency_manager.must_generate(
+                            document_meta.output_document_full_path
+                        )
+                    ):
+                        with report_progress(document_.title):
+                            continue
+
+                    documents_to_export.append(document_)
 
         if len(documents_to_export) > 0:
-            if len(traceability_index.document_tree.document_list) <= 25:
-                parallelizer.run_parallel(documents_to_export, export_binding)
-            else:
-                print(  # noqa: T201
-                    "NOTE: Running document export without parallelization "
-                    "because the document tree contains more than 25 documents."
+            with measure_performance_loop(
+                "Export to HTML", len(documents_to_export)
+            ) as report_progress:
+
+                def on_item_complete(_: int, result: Tuple[str, float]) -> None:
+                    title, elapsed_time = result
+                    with report_progress(title, elapsed_time=elapsed_time):
+                        pass
+
+                parallelizer.run_parallel_with_context(
+                    [
+                        document_.reserved_mid
+                        for document_ in documents_to_export
+                    ],
+                    _export_single_document_worker,
+                    (self, traceability_index),
+                    on_item_complete,
                 )
-                for document_ in documents_to_export:
-                    export_binding(document_)
 
         # Export document tree.
         # FIXME: It is important that this export is **after** the parallelized
@@ -149,14 +224,9 @@ class HTMLGenerator:
         # Export JavaScript map of the document tree (project map)
         self.export_project_map(traceability_index=traceability_index)
 
-        if self.project_config.is_activated_tree_map():
-            self.export_tree_map_screen(traceability_index)
-
-        # Export project statistics.
-        if self.project_config.is_feature_activated(
-            ProjectFeature.PROJECT_STATISTICS_SCREEN
-        ):
-            self.export_project_statistics(traceability_index)
+        # Project statistics is exported by the ExportAction class via the
+        # Feature abstraction (see the ProjectStatisticsFeature class), not
+        # here.
 
         # Export requirements coverage.
         if self.project_config.is_feature_activated(
@@ -183,22 +253,14 @@ class HTMLGenerator:
         )
 
     @staticmethod
-    def export_assets(
+    def export_strictdoc_assets(
         *,
-        traceability_index: Optional[TraceabilityIndex],
         project_config: ProjectConfig,
+        html_templates: HTMLTemplates,
         export_output_html_root: str,
-        flat_assets: bool = False,
     ) -> None:
         """
-        Copy all assets to output dir during HTML/PDF generation.
-
-        :param bool flat_assets: This parameter is always set to False except when
-                                 exporting a "bundle document" with HTML2PDF.
-                                 The bundle document contains all documents of
-                                 the documentation tree. In this case, all assets
-                                 are simply copied to the top level _assets folder,
-                                 independently on how nested the contained documents are.
+        Copy all strictdoc related assets to output dir during HTML/PDF generation.
         """
 
         # Export StrictDoc's own assets.
@@ -206,78 +268,38 @@ class HTMLGenerator:
             export_output_html_root,
             project_config.dir_for_sdoc_assets,
         )
-        sync_dir(
-            project_config.get_static_files_path(),
-            output_html_static_files,
-            message="Copying StrictDoc's assets",
+        for static_files_path in project_config.get_static_files_paths():
+            sync_dir(
+                static_files_path,
+                output_html_static_files,
+                message="Copying StrictDoc's assets",
+            )
+
+        # Write the favicon: a project's own custom file if configured
+        # (see ProjectConfig.get_custom_favicon_path()), or else render it
+        # from the Jinja template so it can encode which kind of StrictDoc
+        # instance (dev/test/docs export) rendered it.
+        favicon_output_path = os.path.join(
+            output_html_static_files, project_config.get_favicon_filename()
         )
+        custom_favicon_path = project_config.get_custom_favicon_path()
+        if custom_favicon_path is not None:
+            shutil.copyfile(custom_favicon_path, favicon_output_path)
+        else:
+            favicon_svg = render_favicon_svg(project_config, html_templates)
+            with open(favicon_output_path, "w", encoding="utf8") as output_file:
+                output_file.write(favicon_svg)
 
-        # Export MathJax.
-        if project_config.is_feature_activated(ProjectFeature.MATHJAX):
-            output_html_mathjax = os.path.join(
-                export_output_html_root,
-                project_config.dir_for_sdoc_assets,
-                "mathjax",
-            )
-            Path(output_html_mathjax).mkdir(parents=True, exist_ok=True)
-            mathjax_src = os.path.join(
-                project_config.get_extra_static_files_path(), "mathjax"
-            )
-            sync_dir(
-                mathjax_src,
-                output_html_mathjax,
-                message="Copying MathJax assets",
-            )
-
-        # Export Mermaid.
-        if project_config.is_feature_activated(ProjectFeature.MERMAID):
-            output_html_mathjax = os.path.join(
-                export_output_html_root,
-                project_config.dir_for_sdoc_assets,
-                "mermaid",
-            )
-            Path(output_html_mathjax).mkdir(parents=True, exist_ok=True)
-            mermaid_src = os.path.join(
-                project_config.get_extra_static_files_path(), "mermaid"
-            )
-            sync_dir(
-                mermaid_src,
-                output_html_mathjax,
-                message="Copying Mermaid assets",
-            )
-
-        # Export Rapidoc.
-        if project_config.is_feature_activated(ProjectFeature.RAPIDOC):
-            output_html_rapidoc = os.path.join(
-                export_output_html_root,
-                project_config.dir_for_sdoc_assets,
-                "rapidoc",
-            )
-            Path(output_html_rapidoc).mkdir(parents=True, exist_ok=True)
-            rapidoc_src = os.path.join(
-                project_config.get_extra_static_files_path(), "rapidoc"
-            )
-            sync_dir(
-                rapidoc_src,
-                output_html_rapidoc,
-                message="Copying Rapidoc assets",
-            )
-
-        # Export NESTOR.
-        if project_config.is_feature_activated(ProjectFeature.NESTOR):
-            output_html_nestor = os.path.join(
-                export_output_html_root,
-                project_config.dir_for_sdoc_assets,
-                "nestor",
-            )
-            Path(output_html_nestor).mkdir(parents=True, exist_ok=True)
-            mathjax_src = os.path.join(
-                project_config.get_extra_static_files_path(), "nestor"
-            )
-            sync_dir(
-                mathjax_src,
-                output_html_nestor,
-                message="Copying Nestor assets",
+        # Copy the project's custom CSS file, if configured. base.jinja.html
+        # links it after StrictDoc's own stylesheets so it can override them.
+        custom_css_path = project_config.custom_css_path
+        if custom_css_path is not None:
+            shutil.copyfile(
+                custom_css_path,
+                os.path.join(
+                    output_html_static_files,
+                    project_config.get_custom_css_filename(),
+                ),
             )
 
         # Export HTML2PDF.
@@ -303,7 +325,23 @@ class HTMLGenerator:
                 message="Copying Custom HTML2PDF template assets",
             )
 
-        # Export project's assets.
+    @staticmethod
+    def export_project_assets(
+        *,
+        traceability_index: Optional[TraceabilityIndex],
+        export_output_html_root: str,
+        flat_assets: bool = False,
+    ) -> None:
+        """
+        Copy the project's assets to output dir during HTML/PDF generation.
+
+        :param bool flat_assets: This parameter is always set to False except when
+                                 exporting a "bundle document" with HTML2PDF.
+                                 The bundle document contains all documents of
+                                 the documentation tree. In this case, all assets
+                                 are simply copied to the top level _assets folder,
+                                 independently on how nested the contained documents are.
+        """
 
         if traceability_index is not None:
             redundant_assets: Dict[str, List[SDocRelativePath]] = {}
@@ -400,22 +438,22 @@ class HTMLGenerator:
             static_path=self.project_config.dir_for_sdoc_assets,
         )
         markup_renderer = MarkupRenderer.create(
-            document.config.markup,
-            traceability_index,
-            link_renderer,
-            self.html_templates,
-            self.project_config,
-            document,
+            markup=document.config.markup,
+            traceability_index=traceability_index,
+            link_renderer=link_renderer,
+            html_templates=self.html_templates,
+            config=self.project_config,
+            context_document=document,
         )
 
         if DocumentType.DOCUMENT in specific_documents:
             # Single Document pages.
             document_content = DocumentHTMLGenerator.export(
-                self.project_config,
-                document,
-                traceability_index,
-                markup_renderer,
-                link_renderer,
+                project_config=self.project_config,
+                document=document,
+                traceability_index=traceability_index,
+                markup_renderer=markup_renderer,
+                link_renderer=link_renderer,
                 git_client=self.git_client,
                 html_templates=self.html_templates,
             )
@@ -431,11 +469,11 @@ class HTMLGenerator:
             and DocumentType.TABLE in specific_documents
         ):
             document_content = DocumentTableHTMLGenerator.export(
-                self.project_config,
-                document,
-                traceability_index,
-                markup_renderer,
-                link_renderer,
+                project_config=self.project_config,
+                document=document,
+                traceability_index=traceability_index,
+                markup_renderer=markup_renderer,
+                link_renderer=link_renderer,
                 git_client=self.git_client,
                 html_templates=self.html_templates,
             )
@@ -451,11 +489,11 @@ class HTMLGenerator:
             and DocumentType.TRACE in specific_documents
         ):
             document_content = DocumentTraceHTMLGenerator.export(
-                self.project_config,
-                document,
-                traceability_index,
-                markup_renderer,
-                link_renderer,
+                project_config=self.project_config,
+                document=document,
+                traceability_index=traceability_index,
+                markup_renderer=markup_renderer,
+                link_renderer=link_renderer,
                 git_client=self.git_client,
                 html_templates=self.html_templates,
             )
@@ -471,11 +509,11 @@ class HTMLGenerator:
             and DocumentType.DEEPTRACE in specific_documents
         ):
             document_content = DocumentDeepTraceHTMLGenerator.export_deep(
-                self.project_config,
-                document,
-                traceability_index,
-                markup_renderer,
-                link_renderer,
+                project_config=self.project_config,
+                document=document,
+                traceability_index=traceability_index,
+                markup_renderer=markup_renderer,
+                link_renderer=link_renderer,
                 git_client=self.git_client,
                 html_templates=self.html_templates,
             )
@@ -489,11 +527,11 @@ class HTMLGenerator:
             and DocumentType.PDF in specific_documents
         ):
             document_content = DocumentHTML2PDFGenerator.export(
-                self.project_config,
-                document,
-                traceability_index,
-                markup_renderer,
-                link_renderer,
+                project_config=self.project_config,
+                document=document,
+                traceability_index=traceability_index,
+                markup_renderer=markup_renderer,
+                link_renderer=link_renderer,
                 git_client=self.git_client,
                 html_templates=self.html_templates,
             )
@@ -571,18 +609,47 @@ class HTMLGenerator:
             traceability_index.document_tree.source_tree, SourceTree
         ), traceability_index.document_tree.source_tree
         print("Generating source files:")  # noqa: T201
-        for (
-            source_file
-        ) in traceability_index.document_tree.source_tree.source_files:
-            if not source_file.is_referenced:
-                continue
 
-            SourceFileViewHTMLGenerator.export_to_file(
-                project_config=self.project_config,
-                source_file=source_file,
-                traceability_index=traceability_index,
-                html_templates=self.html_templates,
-            )
+        referenced_source_files = [
+            source_file
+            for source_file in traceability_index.document_tree.source_tree.source_files
+            if source_file.is_referenced
+        ]
+
+        source_files_to_export: List[SourceFile] = []
+        with measure_performance_loop(
+            "Skip", len(referenced_source_files)
+        ) as report_progress:
+            for source_file in referenced_source_files:
+                if not traceability_index.file_dependency_manager.must_generate(
+                    source_file.output_file_full_path
+                ):
+                    with report_progress(
+                        source_file.in_doctree_source_file_rel_path,
+                        short_title=shorten_path(
+                            source_file.in_doctree_source_file_rel_path
+                        ),
+                    ):
+                        continue
+                source_files_to_export.append(source_file)
+
+        if len(source_files_to_export) > 0:
+            with measure_performance_loop(
+                "File", len(source_files_to_export)
+            ) as report_progress:
+                for source_file in source_files_to_export:
+                    with report_progress(
+                        source_file.in_doctree_source_file_rel_path,
+                        short_title=shorten_path(
+                            source_file.in_doctree_source_file_rel_path
+                        ),
+                    ):
+                        SourceFileViewHTMLGenerator.export_to_file(
+                            project_config=self.project_config,
+                            source_file=source_file,
+                            traceability_index=traceability_index,
+                            html_templates=self.html_templates,
+                        )
 
     def export_source_coverage_screen(
         self,
@@ -635,7 +702,7 @@ class HTMLGenerator:
                 relative_path_to_source_file
                 == source_file.in_doctree_source_file_rel_path_posix
             ):
-                SourceFileViewHTMLGenerator.export_to_file(
+                SourceFileViewHTMLGenerator.export_to_file_with_performance(
                     project_config=self.project_config,
                     source_file=source_file,
                     traceability_index=traceability_index,
@@ -644,65 +711,6 @@ class HTMLGenerator:
                 return
 
         raise FileNotFoundError
-
-    def export_project_statistics(
-        self,
-        traceability_index: TraceabilityIndex,
-    ) -> None:
-        """
-        Export project statistics to a dedicated HTML page.
-
-        @relation(SDOC-SRS-97, scope=function)
-        @relation(SDOC-SRS-154, scope=function)
-        """
-
-        link_renderer = LinkRenderer(
-            root_path="",
-            static_path=self.project_config.dir_for_sdoc_assets,
-        )
-
-        statistics_generator = ProgressStatisticsGenerator
-
-        if (
-            custom_statistics_generator_path
-            := self.project_config.statistics_generator
-        ) is not None:
-            # It is important to add the input folder to the import path.
-            # Otherwise, the custom statistics generator may not be found.
-            # In fact, a more reasonable path to add would be the project config
-            # path, but since it is not maintained by ProjectConfig yet and
-            # usually equals the input path, add the input path for
-            # now.
-            input_paths = self.project_config.input_paths
-            assert input_paths is not None and len(input_paths) > 0, (
-                "Expected a valid input path."
-            )
-            sys.path.insert(0, input_paths[0])
-
-            module_path, class_name = custom_statistics_generator_path.rsplit(
-                ".", 1
-            )
-            try:
-                module = importlib.import_module(module_path)
-                statistics_generator = getattr(module, class_name)
-            except ModuleNotFoundError as module_not_found_error_:
-                raise StrictDocException(
-                    "Could not import a user-provided statistics generator: "
-                    f"{module_not_found_error_}."
-                ) from module_not_found_error_
-
-        document_content = statistics_generator.export(
-            self.project_config,
-            traceability_index,
-            link_renderer,
-            html_templates=self.html_templates,
-        )
-        output_html_source_coverage = os.path.join(
-            self.project_config.export_output_html_root,
-            "project_statistics.html",
-        )
-        with open(output_html_source_coverage, "w", encoding="utf8") as file:
-            file.write(document_content)
 
     @timing_decorator("Export static HTML search index")
     def export_static_html_search_index(
@@ -860,14 +868,4 @@ class HTMLGenerator:
 
         traceability_index.search_index_timestamp = get_file_modification_time(
             output_html_source_coverage
-        )
-
-    def export_tree_map_screen(
-        self,
-        traceability_index: TraceabilityIndex,
-    ) -> None:
-        TreeMapGenerator.export(
-            project_config=self.project_config,
-            traceability_index=traceability_index,
-            html_templates=self.html_templates,
         )

@@ -25,7 +25,7 @@ jobs:
         itest_group: [ "main_group", "html2pdf_group" ]
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 5
 
@@ -36,7 +36,7 @@ jobs:
         echo "$PWD"
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python-version }}
 
@@ -47,14 +47,6 @@ jobs:
     - name: Install minimal Python packages
       run: |
         pip install -r requirements.bootstrap.txt
-
-    - name: "Windows specific: Install StrictDoc's dependencies"
-      run: |
-        python developer/pip_install_strictdoc_deps.py
-
-    - name: "Windows specific: Install Check dependencies (everything for lint + test)"
-      run: |
-        pip install -r requirements.check.txt
 
     - name: " Windows specific: Install Tidy via Chocolatey, and add it to $PATH"
       shell: pwsh

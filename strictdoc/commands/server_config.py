@@ -12,6 +12,7 @@ class ServerCommandConfig:
         self,
         *,
         debug: bool,
+        development: bool = False,
         command: str,
         input_path: str,
         output_path: Optional[str],
@@ -19,8 +20,10 @@ class ServerCommandConfig:
         reload: bool,
         host: Optional[str],
         port: Optional[int],
+        watch: bool = False,
     ):
         self.debug: bool = debug
+        self.development: bool = development
         self.command: str = command
         self._input_path: str = input_path
         self.output_path: Optional[str] = output_path
@@ -28,6 +31,7 @@ class ServerCommandConfig:
         self.reload: bool = reload
         self.host: Optional[str] = host
         self.port: Optional[int] = port
+        self.watch: bool = watch
 
     def get_full_input_path(self) -> str:
         return os.path.abspath(self._input_path)

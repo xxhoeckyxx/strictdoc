@@ -1,0 +1,43 @@
+{% extends "components/modal/form.jinja" %}
+{% set form = "sdoc_modal_form" %}
+{% block modal__context %}{% endblock modal__context %}
+{% block modal_form__header %}
+Edit project title
+{% endblock modal_form__header %}
+{% block modal_form__content %}
+  <form
+    id="{{ form }}"
+    action="/actions/project_index/save_project_title"
+    method="POST"
+    enctype="application/x-www-form-urlencoded"
+    data-turbo="true"
+  >
+    <sdoc-form-grid>
+      <sdoc-form-row>
+        <sdoc-form-row-aside></sdoc-form-row-aside>
+        <sdoc-form-row-main>
+          {%- with
+            field_class_name=none,
+            field_editable=true,
+            field_input_name="project_title",
+            field_label="Project title",
+            field_placeholder="Enter Project title here...",
+            field_type="singleline",
+            field_required=true,
+            field_value=(new_title if new_title is defined else project_config.project_title),
+            testid_postfix="project_title",
+            errors=error_object.get_errors("project_title")
+          -%}
+            {%- include "components/form/field/contenteditable/index.jinja" %}
+          {%- endwith -%}
+        </sdoc-form-row-main>
+        <sdoc-form-row-aside></sdoc-form-row-aside>
+      </sdoc-form-row>
+    </sdoc-form-grid>
+  </form>
+{% endblock modal_form__content %}
+{% block modal_form__footer_submit %}
+  {%- with name="Save" -%}
+    {% include "components/button/submit.jinja" %}
+  {%- endwith -%}
+{% endblock modal_form__footer_submit %}

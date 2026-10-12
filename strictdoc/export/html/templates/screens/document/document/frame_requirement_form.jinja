@@ -22,6 +22,7 @@
   <input type="hidden" id="document_mid" name="document_mid" value="{{ form_object.document_mid }}" />
   <input type="hidden" id="context_document_mid" name="context_document_mid" value="{{ form_object.context_document_mid }}" />
   <input type="hidden" id="element_type" name="element_type" value="{{ form_object.element_type }}" />
+  <input type="hidden" id="document_markup" name="document_markup" value="{{ form_object.document_markup }}" />
 
 {# Fields #}
 <sdoc-tab-content id="Fields" active>
@@ -49,9 +50,11 @@
     {%- for field_ in field_values_ -%}
       {% set text_field_row_context.errors=form_object.get_errors(field_.field_name) %}
       {% set text_field_row_context.field = field_ %}
-      {% set text_field_row_context.field_editable = true %}
+      {% set text_field_row_context.field_editable = field_.is_editable %}
       {% set text_field_row_context.field_type = "singleline" %}
       {% set text_field_row_context.reference_mid = form_object.requirement_mid %}
+      {% set text_field_row_context.existing_requirement_uid = form_object.existing_requirement_uid %}
+      {% set text_field_row_context.uid_restore_available = form_object.uid_rename_blocked_by_relations %}
       {%- if form_object.element_type != "TEXT" and field_.field_name == "UID" and field_.field_value == "" -%}
         <turbo-frame id="uid_with_reset-{{ text_field_row_context.reference_mid }}">
           {# this template is turbo-frame and has a button to reset to the default value: #}
@@ -69,7 +72,7 @@
       {% if field_.field_name != "COMMENT" -%}
         {% set text_field_row_context.errors=form_object.get_errors(field_.field_name) %}
         {% set text_field_row_context.field = field_ %}
-        {% set text_field_row_context.field_editable = true %}
+        {% set text_field_row_context.field_editable = field_.is_editable %}
         {% set text_field_row_context.field_type = "multiline" %}
         {% include "components/form/row/row_with_text_field.jinja" %}
       {%- endif -%}
@@ -78,6 +81,7 @@
 </sdoc-tab-content>
 
 {# Relations #}
+{% if form_object.relation_types %}
 <sdoc-tab-content id="Relations">
   {% set relation_row_context = namespace() %}
 
@@ -89,33 +93,22 @@
     {% include "components/form/row/row_with_relation.jinja" %}
   {%- endfor -%}
 
-  {# Only allow adding relations if the grammar defines at least one
-     non-File relation type (e.g. Parent/Child). This prevents offering
-     relations on SECTION nodes that have no relations in the grammar
-     and avoids defaulting to a File relation without an explicit type. #}
-  {% set creatable_relations = namespace(has=false) %}
-  {% for relation_type_ in form_object.relation_types %}
-    {% if relation_type_ != "File" %}
-      {% set creatable_relations.has = true %}
-    {% endif %}
-  {% endfor %}
-
-  {% if creatable_relations.has %}
-    <div id="requirement_{{ form_object.requirement_mid }}__new_relation"></div>
-    <sdoc-form-row>
-      <a
-        class="action_button"
-        href="/actions/document/new_relation?requirement_mid={{ form_object.requirement_mid }}&document_mid={{ form_object.document_mid }}&context_document_mid={{ form_object.context_document_mid }}&element_type={{ form_object.element_type }}&revision={{ form_object.revision }}"
-        data-turbo-action="replace"
-        data-turbo="true"
-        data-action-type="add_field"
-        data-testid="form-action-add-relation"
-      >{% include "icons/ico16_add.svg" %} Add relation</a>
-    </sdoc-form-row>
-  {% endif %}
+  <div id="requirement_{{ form_object.requirement_mid }}__new_relation"></div>
+  <sdoc-form-row>
+    <a
+      class="action_button"
+      href="/actions/document/new_relation?requirement_mid={{ form_object.requirement_mid }}&document_mid={{ form_object.document_mid }}&context_document_mid={{ form_object.context_document_mid }}&element_type={{ form_object.element_type }}&revision={{ form_object.revision }}"
+      data-turbo-action="replace"
+      data-turbo="true"
+      data-action-type="add_field"
+      data-testid="form-action-add-relation"
+    >{% include "icons/ico16_add.svg" %} Add relation</a>
+  </sdoc-form-row>
 </sdoc-tab-content>
+{% endif %}
 
 {# Comments #}
+{% if "COMMENT" in form_object.fields %}
 <sdoc-tab-content id="Comments">
   {% set comment_field_row_context = namespace() %}
 
@@ -128,7 +121,7 @@
         {%- if field_.field_value|length > 0 -%}
           {% set comment_field_row_context.field = field_ %}
           {% set comment_field_row_context.field_editable = true %}
-          {% set comment_field_row_context.errors = form_object.get_errors(field_.field_name) %}
+          {% set comment_field_row_context.errors = form_object.get_errors(field_.field_mid) %}
           {% include "components/form/row/row_with_comment.jinja" %}
         {%- endif -%}
       {%- endif -%}
@@ -148,5 +141,6 @@
     >{% include "icons/ico16_add.svg" %} Add comment</a>
   </sdoc-form-row>
 </sdoc-tab-content>
+{% endif %}
 
 {% endblock form_content %}

@@ -4,6 +4,7 @@
 
 from typing import Final, List, Optional, Sequence
 
+import tree_sitter_c
 import tree_sitter_cpp
 from tree_sitter import Language, Node, Parser
 
@@ -42,11 +43,34 @@ from strictdoc.helpers.file_system import file_open_read_bytes
 KNOWN_FUNCTION_DEFINITION_MACROS: Final[frozenset[str]] = frozenset(
     (
         # Linux
+        "COMPAT_SYSCALL_DEFINE0",
+        "COMPAT_SYSCALL_DEFINE1",
+        "COMPAT_SYSCALL_DEFINE2",
+        "COMPAT_SYSCALL_DEFINE3",
+        "COMPAT_SYSCALL_DEFINE4",
+        "COMPAT_SYSCALL_DEFINE5",
+        "COMPAT_SYSCALL_DEFINE6",
+        "FIXTURE_SETUP",
+        "FIXTURE_TEARDOWN",
+        "SYSCALL_DEFINE0",
+        "SYSCALL_DEFINE1",
         "SYSCALL_DEFINE2",
-        # Google Test
+        "SYSCALL_DEFINE3",
+        "SYSCALL_DEFINE4",
+        "SYSCALL_DEFINE5",
+        "SYSCALL_DEFINE6",
+        # Google Benchmark
+        "BENCHMARK",
+        "BENCHMARK_F",
+        "BENCHMARK_DEFINE_F",
+        "BENCHMARK_TEMPLATE",
+        "BENCHMARK_TEMPLATE_F",
+        "BENCHMARK_TEMPLATE_DEFINE_F",
+        # Google Test and Linux
         "TEST",
         "TEST_F",
         "TEST_P",
+        "TEST_F_SIGNAL",
         "TYPED_TEST",
         # Zephyr
         "ZTEST_USER",
@@ -72,7 +96,11 @@ class SourceFileTraceabilityReader_C:
         file_stats = SourceFileStats.create(input_buffer)
         parse_context = ParseContext(file_path, file_stats)
 
-        language_arg = tree_sitter_cpp.language()
+        language_arg: object
+        if file_path is not None and file_path.endswith(".c"):
+            language_arg = tree_sitter_c.language()
+        else:
+            language_arg = tree_sitter_cpp.language()
         py_language = Language(language_arg)
         parser = Parser(py_language)
 
@@ -128,24 +156,14 @@ class SourceFileTraceabilityReader_C:
                                 )
 
             elif node_.type in ("declaration", "field_declaration"):
-                function_declarator_node = ts_find_child_node_by_type(
-                    node_, "function_declarator"
+                # Pointer return types ("SomeType *foo();") and C++
+                # reference declarations ("TrkVertex& operator-=(...);")
+                # wrap the function declarator one or more times.
+                function_declarator_node = self._find_function_declarator_node(
+                    node_
                 )
-
-                # C++ reference declaration wrap the function declaration one time.
                 if function_declarator_node is None:
-                    # Example: "TrkVertex& operator-=(const TrkVertex& c);".
-                    reference_declarator_node = ts_find_child_node_by_type(
-                        node_, "reference_declarator"
-                    )
-                    if reference_declarator_node is None:
-                        continue
-
-                    function_declarator_node = ts_find_child_node_by_type(
-                        reference_declarator_node, "function_declarator"
-                    )
-                    if function_declarator_node is None:
-                        continue
+                    continue
 
                 # For normal C functions the identifier is "identifier".
                 # For C++, there are:
@@ -249,23 +267,20 @@ class SourceFileTraceabilityReader_C:
             elif node_.type == "function_definition":
                 function_name = ""
 
-                function_declarator_node = ts_find_child_node_by_type(
-                    node_, "function_declarator"
-                )
-                # C++ reference declaration wrap the function declaration one time.
+                # Pointer return types ("SomeType *foo() { ... }") and C++
+                # reference declarations ("Foo& Foo::operator+(...) {...}")
+                # wrap the function declarator one or more times.
+                try:
+                    function_declarator_node = (
+                        self._find_function_declarator_node(
+                            node_, raise_on_error=True
+                        )
+                    )
+                except LookupError:
+                    # Probably confused by macro, skip node to avoid processing random subtrees.
+                    continue
                 if function_declarator_node is None:
-                    # Example: Foo& Foo::operator+(const Foo& c) { return *this; }
-                    reference_declarator_node = ts_find_child_node_by_type(
-                        node_, "reference_declarator"
-                    )
-                    if reference_declarator_node is None:
-                        continue
-
-                    function_declarator_node = ts_find_child_node_by_type(
-                        reference_declarator_node, "function_declarator"
-                    )
-                    if function_declarator_node is None:
-                        continue
+                    continue
 
                 assert function_declarator_node is not None, node_.text
 
@@ -276,7 +291,14 @@ class SourceFileTraceabilityReader_C:
                     function_declarator_node
                 )
                 if identifier_node is None:
-                    raise NotImplementedError(function_declarator_node)
+                    print(  # noqa: T201
+                        "warning: C/C++ source reader: skipping unsupported "
+                        "function declarator at "
+                        f"{parse_context.filename}:"
+                        f"{function_declarator_node.start_point[0] + 1}: "
+                        f"{function_declarator_node}"
+                    )
+                    continue
 
                 assert identifier_node.text is not None, node_.text
                 function_display_name = identifier_node.text.decode("utf8")
@@ -434,6 +456,32 @@ class SourceFileTraceabilityReader_C:
             return sdoc
 
     @staticmethod
+    def _find_function_declarator_node(
+        node: Node, raise_on_error: bool = False
+    ) -> Optional[Node]:
+        """
+        Find a "function_declarator" among the node's children, descending
+        through "pointer_declarator" (pointer return types, e.g. "SomeType
+        *foo();") and "reference_declarator" (C++ reference return types,
+        e.g. "TrkVertex& foo();") wrappers, which may be nested (e.g.
+        "SomeType **foo();").
+        """
+        function_declarator_node = ts_find_child_node_by_type(
+            node, "function_declarator", raise_on_error=raise_on_error
+        )
+        if function_declarator_node is not None:
+            return function_declarator_node
+
+        for wrapper_type_ in ("pointer_declarator", "reference_declarator"):
+            wrapper_node = ts_find_child_node_by_type(node, wrapper_type_)
+            if wrapper_node is not None:
+                return SourceFileTraceabilityReader_C._find_function_declarator_node(
+                    wrapper_node, raise_on_error=raise_on_error
+                )
+
+        return None
+
+    @staticmethod
     def _get_function_name_node(
         function_declarator_node: Node,
     ) -> Optional[Node]:
@@ -448,7 +496,19 @@ class SourceFileTraceabilityReader_C:
                 "qualified_identifier",
             ),
         )
-        return function_identifier_node
+        if function_identifier_node is not None:
+            return function_identifier_node
+
+        nested_function_declarator_node = ts_find_child_node_by_type(
+            function_declarator_node,
+            "function_declarator",
+        )
+        if nested_function_declarator_node is not None:
+            return SourceFileTraceabilityReader_C._get_function_name_node(
+                nested_function_declarator_node
+            )
+
+        return None
 
     @staticmethod
     def get_node_ns(node: Node) -> Sequence[str]:

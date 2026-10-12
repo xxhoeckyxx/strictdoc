@@ -160,7 +160,11 @@ class DocumentGrammar(SDocGrammarIF):
         return grammar
 
     @staticmethod
-    def create_for_test_report(parent: SDocDocumentIF) -> "DocumentGrammar":
+    def create_for_test_report(
+        parent: SDocDocumentIF,
+        *,
+        additional_fields: Optional[List[GrammarElementFieldString]] = None,
+    ) -> "DocumentGrammar":
         section_element: GrammarElement = (
             DocumentGrammar.create_default_section_element(
                 parent=None, enable_mid=parent.config.enable_mid == True
@@ -203,19 +207,25 @@ class DocumentGrammar(SDocGrammarIF):
                 human_title=None,
                 required="True",
             ),
-            GrammarElementFieldString(
-                parent=None,
-                title=RequirementFieldName.TITLE,
-                human_title=None,
-                required="True",
-            ),
-            GrammarElementFieldString(
-                parent=None,
-                title=RequirementFieldName.STATEMENT,
-                human_title=None,
-                required="False",
-            ),
         ]
+        if additional_fields is not None:
+            fields.extend(additional_fields)
+        fields.extend(
+            [
+                GrammarElementFieldString(
+                    parent=None,
+                    title=RequirementFieldName.TITLE,
+                    human_title=None,
+                    required="True",
+                ),
+                GrammarElementFieldString(
+                    parent=None,
+                    title=RequirementFieldName.STATEMENT,
+                    human_title=None,
+                    required="False",
+                ),
+            ]
+        )
         requirement_element = GrammarElement(
             parent=None,
             tag="TEST_RESULT",
@@ -268,6 +278,22 @@ class DocumentGrammar(SDocGrammarIF):
             if element_.tag == "TEXT":
                 return True
         return False
+
+    def has_custom_elements(self) -> bool:
+        """
+        Return True when the grammar defines element types beyond the
+        built-in set {SECTION, TEXT, REQUIREMENT}.
+
+        When the grammar has not yet been resolved (elements_by_type is
+        empty but import_from_file is set), True is returned so that the
+        Markdown writer can emit TYPE fields for round-trip safety.
+        """
+        if self.is_default:
+            return False
+        _builtin = {"SECTION", "TEXT", "REQUIREMENT"}
+        if len(self.elements_by_type) == 0:
+            return self.import_from_file is not None
+        return any(t not in _builtin for t in self.elements_by_type)
 
     def add_element_first(self, element: GrammarElement) -> None:
         self.elements.insert(0, element)

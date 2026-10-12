@@ -5,6 +5,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
 from strictdoc.helpers.mid import MID
+from tests.end2end.conftest import test_environment
 from tests.end2end.e2e_case import E2ECase
 
 
@@ -37,6 +38,27 @@ class Form:  # pylint: disable=invalid-name
         self.test_case.assert_element(
             f"//sdoc-form-error[contains(., '{message}')]", by=By.XPATH
         )
+
+    def assert_error_not_present(self, message: str) -> None:
+        try:
+            self.test_case.assert_element_not_present(
+                f"//sdoc-form-error[contains(., '{message}')]", by=By.XPATH
+            )
+        except Exception:
+            # This assertion has failed intermittently on CI with no local
+            # repro (message still present after the default wait). Dump
+            # the live state of every form row so a future CI failure
+            # carries the actual DOM instead of just a timeout message.
+            rows_html = self.test_case.execute_script(
+                "return [...document.querySelectorAll('sdoc-form-row')]"
+                ".map(row => row.outerHTML).join('\\n---\\n');"
+            )
+            print(  # noqa: T201
+                "\n[assert_error_not_present] Timed out waiting for this "
+                f"error to disappear: {message!r}\n"
+                f"Current sdoc-form-row elements on the page:\n{rows_html}"
+            )
+            raise
 
     def assert_contenteditable_contains(self, text: str) -> None:
         self.test_case.assert_element(
@@ -75,6 +97,22 @@ class Form:  # pylint: disable=invalid-name
             f"//*[@data-testid='form-tab-{tab_name}']",
             "active",
             "",
+            by=By.XPATH,
+        )
+
+    def assert_tab_not_present(self, tab_name: str = "") -> None:
+        assert isinstance(tab_name, str)
+        self.test_case.assert_element_not_present(
+            f"//*[@data-testid='form-tab-{tab_name}']"
+        )
+
+    def assert_tab_error_count(self, tab_name: str, count: int) -> None:
+        assert isinstance(tab_name, str)
+        assert isinstance(count, int)
+        self.test_case.assert_attribute(
+            f"//*[@data-testid='form-tab-{tab_name}']",
+            "data-errors",
+            str(count),
             by=By.XPATH,
         )
 
@@ -133,6 +171,7 @@ class Form:  # pylint: disable=invalid-name
         assert isinstance(field_value, str)
 
         field_xpath = f"(//*[@mid='{mid}' and @data-testid='{test_id}'])"
+
         for _ in range(3):
             self.test_case.type(field_xpath, f"{field_value}", by=By.XPATH)
             element = self.test_case.find_element(field_xpath)
@@ -163,9 +202,9 @@ class Form:  # pylint: disable=invalid-name
         self.test_case.type(field_xpath, f"{field_value}", by=By.XPATH)
 
         # We wait until the results <ul> is displayed.
-        WebDriverWait(self.test_case.driver, 3).until(
-            lambda _: results_ul.is_displayed()
-        )
+        WebDriverWait(
+            self.test_case.driver, test_environment.wait_timeout_seconds
+        ).until(lambda _: results_ul.is_displayed())
 
         # We send Arrow-Down and Enter select the first match.
         # The stimulus.js controller uses a debounce of 10ms, we are
@@ -178,10 +217,93 @@ class Form:  # pylint: disable=invalid-name
 
         # Now wait for the length of the field to increase, this means
         # the autocomplete did happen.
-        WebDriverWait(self.test_case.driver, timeout=3).until(
+        WebDriverWait(
+            self.test_case.driver,
+            timeout=test_environment.wait_timeout_seconds,
+        ).until(
             lambda _: (
                 len(element.text.lower().strip()) > len_before_autocomplete
             )
+        )
+
+    def assert_autocomplete_no_results(
+        self, test_id: str, field_value: str
+    ) -> None:
+        assert isinstance(test_id, str)
+        assert isinstance(field_value, str)
+
+        field_xpath = f"(//*[@data-testid='{test_id}'])"
+        element = self.test_case.find_element(field_xpath)
+        hidden_input = element.find_element(
+            By.XPATH, 'following-sibling::input[@type="hidden"]'
+        )
+        results_ul = hidden_input.find_element(
+            By.XPATH, "following-sibling::ul[1]"
+        )
+
+        # We simulate a user typing a query that has no matches.
+        self.test_case.type(field_xpath, f"{field_value}", by=By.XPATH)
+
+        # We wait until the results <ul> is displayed.
+        WebDriverWait(
+            self.test_case.driver, test_environment.wait_timeout_seconds
+        ).until(lambda _: results_ul.is_displayed())
+
+        no_results_item = results_ul.find_element(
+            By.XPATH,
+            ".//li[@aria-disabled='true'][contains(., 'No matches found')]",
+        )
+        assert no_results_item.is_displayed()
+
+        # The "No matches found" row must not be selectable: Arrow-Down
+        # followed by Enter must not change the field's content.
+        text_before = element.text
+        select_action = ActionChains(self.test_case.driver)
+        select_action.send_keys(Keys.ARROW_DOWN).pause(0.1).send_keys(
+            Keys.RETURN
+        ).perform()
+        assert element.text == text_before
+
+    def assert_autocomplete_no_duplicate_on_click(
+        self, test_id: str, already_selected_value: str
+    ) -> None:
+        assert isinstance(test_id, str)
+        assert isinstance(already_selected_value, str)
+
+        field_xpath = f"(//*[@data-testid='{test_id}'])"
+        element = self.test_case.find_element(field_xpath)
+        hidden_input = element.find_element(
+            By.XPATH, 'following-sibling::input[@type="hidden"]'
+        )
+        results_ul = hidden_input.find_element(
+            By.XPATH, "following-sibling::ul[1]"
+        )
+
+        # The field already contains already_selected_value (with no
+        # trailing comma). A click re-opens the dropdown: it must not
+        # offer already_selected_value again.
+        text_before = element.text
+        element.click()
+
+        WebDriverWait(
+            self.test_case.driver, test_environment.wait_timeout_seconds
+        ).until(lambda _: results_ul.is_displayed())
+
+        self.test_case.assert_element_not_present(
+            f"{field_xpath}/following-sibling::input[@type='hidden']"
+            "/following-sibling::ul[1]"
+            f"//li[@data-autocompletable-value='{already_selected_value}']",
+            by=By.XPATH,
+        )
+
+        # Selecting whatever is offered (if anything) must not duplicate
+        # already_selected_value in the field.
+        select_action = ActionChains(self.test_case.driver)
+        select_action.send_keys(Keys.ARROW_DOWN).pause(0.1).send_keys(
+            Keys.RETURN
+        ).perform()
+        assert element.text.count(already_selected_value) == text_before.count(
+            already_selected_value
         )
 
     def do_append_command_and_use_autocomplete_result_again(
@@ -203,12 +325,12 @@ class Form:  # pylint: disable=invalid-name
         element.send_keys(f",{field_value}")
 
         # We wait until the results <ul> is displayed.
-        WebDriverWait(self.test_case.driver, 3).until(
-            lambda _: results_ul.is_displayed()
-        )
+        WebDriverWait(
+            self.test_case.driver, test_environment.wait_timeout_seconds
+        ).until(lambda _: results_ul.is_displayed())
 
         # We send Arrow-Down and Enter select the first match.
-        # The stimulus.js controller uses a debounce of 50ms, we are
+        # autocompletable_field.js uses a debounce of 50ms, we are
         # careful to use an larger interval inbetween key presses.
         len_before_autocomplete = len(element.text.lower().strip())
         select_first_match_action = ActionChains(self.test_case.driver)
@@ -218,7 +340,10 @@ class Form:  # pylint: disable=invalid-name
 
         # Now wait for the length of the field to increase, this means
         # the autocomplete did happen.
-        WebDriverWait(self.test_case.driver, timeout=3).until(
+        WebDriverWait(
+            self.test_case.driver,
+            timeout=test_environment.wait_timeout_seconds,
+        ).until(
             lambda _: (
                 len(element.text.lower().strip()) > len_before_autocomplete
             )
@@ -232,18 +357,44 @@ class Form:  # pylint: disable=invalid-name
         assert isinstance(field_value, str)
 
         field_xpath = f"(//*[@mid='{mid}' and @data-testid='{test_id}'])"
-        for _ in range(3):
-            self.test_case.type(field_xpath, f"{field_value}", by=By.XPATH)
-            element = self.test_case.find_element(field_xpath)
-            element.send_keys(Keys.ARROW_DOWN)
-            element.send_keys(Keys.RETURN)
-            if field_value in element.text:
-                break
-        else:
-            raise AssertionError(
-                f"The text field could not be filled with the value: "
-                f"'{field_value}'."
-            )
+        element = self.test_case.find_element(field_xpath)
+        hidden_input = element.find_element(
+            By.XPATH, 'following-sibling::input[@type="hidden"]'
+        )
+        results_ul = hidden_input.find_element(
+            By.XPATH, "following-sibling::ul[1]"
+        )
+
+        # We simulate a user typing the supplied field_value.
+        self.test_case.type(field_xpath, f"{field_value}", by=By.XPATH)
+
+        # We wait until the results <ul> is displayed. Sending Arrow-Down and
+        # Enter before the autocomplete request has resolved is a no-op that
+        # leaves the raw typed prefix in the field (e.g. "REQ-"), which is
+        # still a substring of the expected value and previously made this
+        # method report a false success, saving an invalid relation UID.
+        WebDriverWait(
+            self.test_case.driver, test_environment.wait_timeout_seconds
+        ).until(lambda _: results_ul.is_displayed())
+
+        # We send Arrow-Down and Enter select the first match.
+        # autocompletable_field.js uses a debounce of 10ms, we are
+        # careful to use an larger interval inbetween key presses.
+        select_first_match_action = ActionChains(self.test_case.driver)
+        select_first_match_action.send_keys(Keys.ARROW_DOWN).pause(
+            0.1
+        ).send_keys(Keys.RETURN).perform()
+
+        # Committing a match always closes the results dropdown (see
+        # commit() in autocompletable_field.js). Wait for that
+        # instead of a text-length increase: when field_value is already the
+        # full target value (e.g. "REQ-001"), selecting the match commits
+        # the same text, so the field's length never grows even though the
+        # selection succeeded.
+        WebDriverWait(
+            self.test_case.driver,
+            timeout=test_environment.wait_timeout_seconds,
+        ).until(lambda _: not results_ul.is_displayed())
 
     def do_clear_field(self, field_name: str, field_order: int = 1) -> None:
         assert isinstance(field_name, str)

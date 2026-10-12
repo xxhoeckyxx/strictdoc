@@ -1,4 +1,4 @@
-from strictdoc.export.markdown.markdown_to_html_fragment_writer import (
+from strictdoc.backend.markdown.markdown_to_html_fragment_writer import (
     MarkdownToHtmlFragmentWriter,
 )
 
@@ -6,7 +6,7 @@ from strictdoc.export.markdown.markdown_to_html_fragment_writer import (
 def test_01_writes_markdown_to_html_fragment():
     markdown_input = "This is **bold** text."
 
-    html_output = MarkdownToHtmlFragmentWriter.write(markdown_input)
+    html_output = MarkdownToHtmlFragmentWriter().write(markdown_input)
 
     assert html_output == "<p>This is <strong>bold</strong> text.</p>\n"
 
@@ -36,10 +36,103 @@ def test_03_write_with_validation_returns_html_without_error():
 def test_04_writes_markdown_table_to_html_table():
     markdown_input = "| Col A | Col B |\n| --- | --- |\n| A1 | B1 |\n"
 
-    html_output = MarkdownToHtmlFragmentWriter.write(markdown_input)
+    html_output = MarkdownToHtmlFragmentWriter().write(markdown_input)
 
     assert "<table>" in html_output
     assert "<th>Col A</th>" in html_output
     assert "<th>Col B</th>" in html_output
     assert "<td>A1</td>" in html_output
     assert "<td>B1</td>" in html_output
+
+
+def test_05_writes_mermaid_fence_as_mermaid_pre_block():
+    markdown_input = "```mermaid\ngraph TD\n  A-->B\n```\n"
+
+    html_output = MarkdownToHtmlFragmentWriter().write(markdown_input)
+
+    assert html_output == (
+        '<pre class="mermaid">graph TD\n  A--&gt;B\n</pre>\n'
+    )
+
+
+def test_05a_writes_plantuml_fence_as_plantuml_pre_block():
+    markdown_input = "```plantuml\n@startuml\nAlice -> Bob\n@enduml\n```\n"
+
+    html_output = MarkdownToHtmlFragmentWriter().write(markdown_input)
+
+    assert html_output == (
+        '<pre class="plantuml">@startuml\nAlice -&gt; Bob\n@enduml\n</pre>\n'
+    )
+
+
+def test_06_writes_recognized_language_fence_as_highlighted_code_block():
+    markdown_input = "```python\nprint(1)\n```\n"
+
+    html_output = MarkdownToHtmlFragmentWriter().write(markdown_input)
+
+    assert html_output == (
+        '<pre class="code">\n'
+        '<span class="nb">print</span><span class="p">(</span>'
+        '<span class="mi">1</span><span class="p">)</span>\n'
+        "</pre>\n"
+    )
+
+
+def test_06a_writes_unrecognized_language_fence_as_plain_code_block():
+    markdown_input = "```notalang\nsome text\n```\n"
+
+    html_output = MarkdownToHtmlFragmentWriter().write(markdown_input)
+
+    assert html_output == (
+        '<pre><code class="language-notalang">some text\n</code></pre>\n'
+    )
+
+
+def test_07_renders_anchor_link_as_raw_html_not_escaped():
+    markdown_input = MarkdownToHtmlFragmentWriter.write_anchor_link(
+        "Title",
+        "foo.bar",
+    )
+
+    html_output = MarkdownToHtmlFragmentWriter().write(markdown_input)
+
+    assert html_output == '<p><a href="foo.bar">🔗\u00a0Title</a></p>\n'
+
+
+def test_08_renders_inline_math_formula():
+    markdown_input = "The mass is $m_d = 120\\,kg$."
+
+    html_output = MarkdownToHtmlFragmentWriter().write(markdown_input)
+
+    assert (
+        html_output
+        == '<p>The mass is <span class="math notranslate nohighlight">\\( m_d = 120\\,kg \\)</span>.</p>\n'
+    )
+
+
+def test_09_renders_display_math_formula():
+    markdown_input = "The formula $$E = mc^2$$."
+
+    html_output = MarkdownToHtmlFragmentWriter().write(markdown_input)
+
+    assert (
+        html_output
+        == '<p>The formula <div class="math notranslate nohighlight">\\[ E = mc^2 \\]</div>.</p>\n'
+    )
+
+
+def test_10_renders_two_inline_math_formulas_in_one_paragraph():
+    markdown_input = (
+        "The dry mass $m_d = 120\\,kg$ and propellant mass $m_p = 30\\,kg$."
+    )
+
+    html_output = MarkdownToHtmlFragmentWriter().write(markdown_input)
+
+    assert (
+        '<span class="math notranslate nohighlight">\\( m_d = 120\\,kg \\)</span>'
+        in html_output
+    )
+    assert (
+        '<span class="math notranslate nohighlight">\\( m_p = 30\\,kg \\)</span>'
+        in html_output
+    )

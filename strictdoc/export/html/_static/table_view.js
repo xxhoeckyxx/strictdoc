@@ -1,13 +1,47 @@
 (function () {
     const STORAGE_KEY_PREFIX = 'strictdoc.table.hidden_cols';
+    const ROWS_STORAGE_KEY_PREFIX = 'strictdoc.table.hidden_rows';
     const URL_PARAM = 'hidden';
+    const EVENT_BEFORE_STATE_CHANGE =
+        'strictdoc:table-view-before-state-change';
+    const EVENT_AFTER_STATE_CHANGE =
+        'strictdoc:table-view-after-state-change';
+
+    function changeTableState(changeType, callback) {
+        document.dispatchEvent(new CustomEvent(
+            EVENT_BEFORE_STATE_CHANGE,
+            { detail: { changeType } }
+        ));
+        try {
+            callback();
+        } finally {
+            document.dispatchEvent(new CustomEvent(
+                EVENT_AFTER_STATE_CHANGE,
+                { detail: { changeType } }
+            ));
+        }
+    }
 
     /*
      * State I/O
      */
 
-    function getStorageKey() {
-        return STORAGE_KEY_PREFIX + ':' + location.pathname;
+    function storageKey(prefix) {
+        return prefix + ':' + location.pathname;
+    }
+
+    function readJson(key) {
+        try {
+            return JSON.parse(localStorage.getItem(key) || '[]');
+        } catch (_) {
+            return [];
+        }
+    }
+
+    function writeJson(key, value) {
+        try {
+            localStorage.setItem(key, JSON.stringify(value));
+        } catch (_) {}
     }
 
     // Returns array of hidden column names from URL, or null if param is absent.
@@ -17,20 +51,6 @@
         if (!params.has(URL_PARAM)) return null;
         const val = params.get(URL_PARAM);
         return val ? val.split('|').map(decodeURIComponent) : [];
-    }
-
-    function readFromStorage() {
-        try {
-            return JSON.parse(localStorage.getItem(getStorageKey()) || '[]');
-        } catch (_) {
-            return [];
-        }
-    }
-
-    function writeToStorage(hiddenNames) {
-        try {
-            localStorage.setItem(getStorageKey(), JSON.stringify(hiddenNames));
-        } catch (_) {}
     }
 
     function writeToURL(hiddenNames) {
@@ -51,7 +71,7 @@
     }
 
     function persistState(hiddenNames) {
-        writeToStorage(hiddenNames);
+        writeJson(storageKey(STORAGE_KEY_PREFIX), hiddenNames);
         writeToURL(hiddenNames);
     }
 
@@ -67,10 +87,10 @@
     function resolveInitialHidden() {
         const fromURL = readFromURL();
         if (fromURL !== null) {
-            writeToStorage(fromURL);
+            writeJson(storageKey(STORAGE_KEY_PREFIX), fromURL);
             return fromURL;
         }
-        const fromStorage = readFromStorage();
+        const fromStorage = readJson(storageKey(STORAGE_KEY_PREFIX));
         writeToURL(fromStorage);
         return fromStorage;
     }
@@ -82,7 +102,7 @@
     function setColumnVisibility(table, index, visible) {
         const ths = table.querySelectorAll(':scope > thead > tr > th');
         if (ths[index]) ths[index].style.display = visible ? '' : 'none';
-        table.querySelectorAll(':scope > tbody > tr').forEach(row => {
+        table.querySelectorAll(':scope > tbody > tr[data-row-type]').forEach(row => {
             const cell = row.children[index];
             if (cell) cell.style.display = visible ? '' : 'none';
         });
@@ -97,109 +117,199 @@
     }
 
     /*
-     * Toolbar
+     * Shared panel helpers
      */
 
-    function buildToolbar(table, columns, onToggle) {
-        const toolbar = document.createElement('div');
-        toolbar.className = 'table-toolbar';
-        toolbar.setAttribute('data-testid', 'table-toolbar');
+    function updateBtnLabel(btn, items) {
+        const hidden = items.filter(i => !i.visible).length;
+        const infoEl = btn.querySelector('.table-toolbar__btn-info');
+        infoEl.textContent = hidden > 0 ? ' • ' + hidden + ' hidden' : '';
+    }
 
-        const btn = document.createElement('button');
-        btn.className = 'table-toolbar__btn action_button';
-        btn.setAttribute('aria-haspopup', 'true');
-        btn.setAttribute('aria-expanded', 'false');
-        btn.setAttribute('data-testid', 'table-toolbar-columns-btn');
+    function syncResetBtn(resetBtn, items) {
+        resetBtn.disabled = items.every(i => i.visible);
+    }
 
-        const panel = document.createElement('div');
-        panel.className = 'table-toolbar__panel dropdown_menu';
+    function openPanel(btn, panel) {
+        panel.hidden = false;
+        btn.setAttribute('aria-expanded', 'true');
+        panel.setAttribute('aria-hidden', 'false');
+    }
+
+    function closePanel(btn, panel) {
         panel.hidden = true;
+        btn.setAttribute('aria-expanded', 'false');
         panel.setAttribute('aria-hidden', 'true');
-        panel.setAttribute('role', 'dialog');
-        panel.setAttribute('aria-label', 'Column visibility');
-        panel.setAttribute('data-testid', 'table-toolbar-columns-panel');
+    }
 
-        const panelHeader = document.createElement('div');
-        panelHeader.className = 'table-toolbar__panel-header';
+    // panels registry — populated by each initXxxPanel() call
+    const _panels = [];
 
-        const panelTitle = document.createElement('span');
-        panelTitle.className = 'table-toolbar__panel-title';
-        panelTitle.textContent = 'Columns';
+    function closeAllPanels() {
+        _panels.forEach(({ btn, panel }) => closePanel(btn, panel));
+    }
 
-        const resetBtn = document.createElement('button');
-        resetBtn.className = 'table-toolbar__reset compact action_button';
-        resetBtn.textContent = 'Show all';
-        resetBtn.setAttribute('data-testid', 'table-toolbar-columns-reset');
-        function syncResetBtn() {
-            resetBtn.disabled = columns.every(c => c.visible);
-        }
-
-        resetBtn.addEventListener('click', () => {
-            columns.forEach(col => onToggle(col, true));
-            panel.querySelectorAll('input[type=checkbox]').forEach(cb => (cb.checked = true));
-            updateBtnLabel(btn, columns);
-            syncResetBtn();
-        });
-
-        panelHeader.appendChild(panelTitle);
-        panelHeader.appendChild(resetBtn);
-        panel.appendChild(panelHeader);
-
-        const list = document.createElement('ul');
-        list.className = 'table-toolbar__list';
-
-        columns.forEach(col => {
-            const item = document.createElement('li');
-            item.className = 'table-toolbar__item';
-
-            const label = document.createElement('label');
-            label.className = 'table-toolbar__label';
-
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.checked = col.visible;
-            checkbox.setAttribute('data-testid', 'col-checkbox-' + col.name);
-            checkbox.addEventListener('change', () => {
-                onToggle(col, checkbox.checked);
-                updateBtnLabel(btn, columns);
-                syncResetBtn();
-            });
-
-            label.appendChild(checkbox);
-            label.appendChild(document.createTextNode(' ' + col.name));
-            item.appendChild(label);
-            list.appendChild(item);
-        });
-
-        panel.appendChild(list);
-
+    function initPanelToggle(btn, panel) {
         btn.addEventListener('click', e => {
             e.stopPropagation();
             const opening = panel.hidden;
-            panel.hidden = !opening;
-            btn.setAttribute('aria-expanded', String(opening));
-            panel.setAttribute('aria-hidden', String(!opening));
+            closeAllPanels();
+            if (opening) openPanel(btn, panel);
         });
-
-        document.addEventListener('click', e => {
-            if (!toolbar.contains(e.target)) {
-                panel.hidden = true;
-                btn.setAttribute('aria-expanded', 'false');
-                panel.setAttribute('aria-hidden', 'true');
-            }
-        });
-
-        toolbar.appendChild(btn);
-        toolbar.appendChild(panel);
-
-        updateBtnLabel(btn, columns);
-        syncResetBtn();
-        return toolbar;
     }
 
-    function updateBtnLabel(btn, columns) {
-        const hidden = columns.filter(c => !c.visible).length;
-        btn.textContent = hidden > 0 ? 'Columns (' + hidden + ' hidden)' : 'Columns visibility';
+    /*
+     * Checkbox list item
+     * Uses template-icon-checkbox from components/checkbox/index.jinja.
+     * Expected: <label class="icon-checkbox"> with <input type="checkbox"> and <span>
+     */
+
+    function createCheckboxItem(testid, checked, label, onChange) {
+        const tmpl = document.getElementById('template-icon-checkbox');
+        const item = document.createElement('li');
+        item.className = 'table-toolbar__item';
+        const labelEl = tmpl.content.cloneNode(true).querySelector('label');
+        const checkbox = labelEl.querySelector('input[type=checkbox]');
+        const text = labelEl.querySelector('span');
+
+        checkbox.checked = checked;
+        labelEl.setAttribute('data-testid', testid);
+        checkbox.addEventListener('change', () => onChange(checkbox.checked));
+
+        text.textContent = label;
+        item.appendChild(labelEl);
+        return item;
+    }
+
+    /*
+     * Columns panel
+     */
+
+    function initColumnsPanel(table, columns, onToggle) {
+        const btn = document.querySelector('[data-testid="table-toolbar-columns-btn"]');
+        const panel = document.querySelector('[data-testid="table-toolbar-columns-panel"]');
+        const resetBtn = document.querySelector('[data-testid="table-toolbar-columns-reset"]');
+        const list = document.querySelector('[data-testid="table-toolbar-columns-list"]');
+
+        _panels.push({ btn, panel });
+
+        // Disable visibility control for the “Type” column:
+        const typeIndex = columns.findIndex(item => item.name === 'Type');
+        columns.splice(typeIndex, 1);
+
+        columns.forEach(col => {
+            list.appendChild(createCheckboxItem(
+                'col-checkbox-' + col.name,
+                col.visible,
+                col.name,
+                (checked) => {
+                    onToggle(col, checked);
+                    updateBtnLabel(btn, columns);
+                    syncResetBtn(resetBtn, columns);
+                }
+            ));
+        });
+
+        resetBtn.addEventListener('click', () => {
+            columns.forEach(col => onToggle(col, true));
+            list.querySelectorAll('input[type=checkbox]').forEach(cb => (cb.checked = true));
+            updateBtnLabel(btn, columns);
+            syncResetBtn(resetBtn, columns);
+        });
+
+        initPanelToggle(btn, panel);
+
+        updateBtnLabel(btn, columns);
+        syncResetBtn(resetBtn, columns);
+    }
+
+    /*
+     * Row visibility
+     */
+
+    function setRowTypeVisibility(tbody, type, visible) {
+        tbody.querySelectorAll(':scope > tr[data-row-type="' + type + '"]').forEach(row => {
+            row.style.display = visible ? '' : 'none';
+        });
+    }
+
+    function initRowsPanel(table) {
+        const btn = document.querySelector('[data-testid="table-toolbar-rows-btn"]');
+        const panel = document.querySelector('[data-testid="table-toolbar-rows-panel"]');
+        const resetBtn = document.querySelector('[data-testid="table-toolbar-rows-reset"]');
+        const list = document.querySelector('[data-testid="table-toolbar-rows-list"]');
+        const rowsKey = storageKey(ROWS_STORAGE_KEY_PREFIX);
+        let rowTypes = [];
+
+        _panels.push({ btn, panel });
+
+        function refreshRowsPanel() {
+            const tbody = table.querySelector(':scope > tbody');
+            if (!tbody) return;
+
+            list.innerHTML = '';
+
+            // Collect unique row types from the current tbody, preserving order.
+            const seenTypes = [];
+            tbody.querySelectorAll(':scope > tr[data-row-type]').forEach(row => {
+                const type = row.dataset.rowType;
+                if (!seenTypes.includes(type)) seenTypes.push(type);
+            });
+
+            const hiddenTypes = new Set(readJson(rowsKey));
+            rowTypes = seenTypes.map(type => ({
+                type,
+                visible: !hiddenTypes.has(type),
+            }));
+
+            rowTypes.forEach(rowType => {
+                setRowTypeVisibility(tbody, rowType.type, rowType.visible);
+                list.appendChild(createCheckboxItem(
+                    'row-checkbox-' + rowType.type,
+                    rowType.visible,
+                    rowType.type,
+                    (checked) => {
+                        changeTableState('rows', () => {
+                            rowType.visible = checked;
+                            setRowTypeVisibility(tbody, rowType.type, checked);
+                            writeJson(
+                                rowsKey,
+                                rowTypes
+                                    .filter(r => !r.visible)
+                                    .map(r => r.type)
+                            );
+                            updateBtnLabel(btn, rowTypes);
+                            syncResetBtn(resetBtn, rowTypes);
+                        });
+                    }
+                ));
+            });
+
+            updateBtnLabel(btn, rowTypes);
+            syncResetBtn(resetBtn, rowTypes);
+        }
+
+        resetBtn.addEventListener('click', () => {
+            const tbody = table.querySelector(':scope > tbody');
+            if (!tbody) return;
+            changeTableState('rows', () => {
+                rowTypes.forEach(rowType => {
+                    rowType.visible = true;
+                    setRowTypeVisibility(tbody, rowType.type, true);
+                });
+                list.querySelectorAll('input[type=checkbox]').forEach(
+                    cb => (cb.checked = true)
+                );
+                writeJson(rowsKey, []);
+                updateBtnLabel(btn, rowTypes);
+                syncResetBtn(resetBtn, rowTypes);
+            });
+        });
+
+        initPanelToggle(btn, panel);
+
+        refreshRowsPanel();
+        return refreshRowsPanel;
     }
 
     /*
@@ -210,9 +320,8 @@
         const table = document.querySelector('.content-view-table');
         if (!table) return;
 
+        const toolbar = document.querySelector('[data-testid="table-toolbar"]');
         const headerCells = Array.from(table.querySelectorAll(':scope > thead > tr > .content-view-th'));
-        const tbody = table.querySelector(':scope > tbody');
-
         const columns = headerCells.map((th, index) => ({
             index,
             name: th.textContent.trim(),
@@ -228,28 +337,125 @@
             persistState(columns.filter(c => !c.visible).map(c => c.name));
         }
 
-        const toolbar = buildToolbar(table, columns, onToggle);
-        table.parentNode.insertBefore(toolbar, table);
+        initColumnsPanel(table, columns, onToggle);
+        const refreshRowsPanel = initRowsPanel(table);
 
-        headerCells.forEach((headerCell, index) => {
-            headerCell.addEventListener('click', () => {
-                const isAscending = headerCell.classList.contains('ascending');
-                sortTable(index, !isAscending);
-                headerCells.forEach(cell => cell.classList.remove('ascending', 'descending'));
-                headerCell.classList.add(isAscending ? 'descending' : 'ascending');
-            });
+        let originalRows = Array.from(
+            table.querySelectorAll(':scope > tbody > tr')
+        );
+        let sortState = null; // { index, dir: 'asc'|'desc' }
+
+        function getTbody() {
+            return table.querySelector(':scope > tbody');
+        }
+
+        function refreshBodyState() {
+            applyHiddenNames(
+                table,
+                columns,
+                columns.filter(col => !col.visible).map(col => col.name)
+            );
+            refreshRowsPanel();
+            originalRows = Array.from(
+                table.querySelectorAll(':scope > tbody > tr')
+            );
+            if (sortState) {
+                clearSortUI();
+                sortState = null;
+                setSortReset(false);
+            }
+        }
+
+        const bodyObserver = new MutationObserver(() => {
+            refreshBodyState();
+        });
+        bodyObserver.observe(table, { childList: true, subtree: false });
+
+        document.addEventListener('click', e => {
+            if (toolbar && !toolbar.contains(e.target)) {
+                closeAllPanels();
+            }
         });
 
-        function sortTable(columnIndex, ascending) {
+        /*
+         * Column sorting
+         *
+         * The sort logic (save originalRows, sort by textContent, restore on reset)
+         * mirrors source_coverage_screen.js — a shared pattern, candidate for future
+         * extraction into a common helper.
+         *
+         * Three-state cycle per column: none → asc → desc → none.
+         * State is stored in data-sort attribute on <th>; CSS uses it to show
+         * the matching icon variant (.sort-none / .sort-asc / .sort-desc).
+         * Only the sort icon button triggers sorting, not the full <th>.
+         */
+
+        const sortResetWrapper = document.querySelector('.table-toolbar__sort-reset');
+        const sortResetBtn = document.querySelector('[data-testid="table-toolbar-sort-reset"]');
+
+        function setSortReset(active) {
+            if (sortResetWrapper) sortResetWrapper.hidden = !active;
+        }
+
+        function clearSortUI() {
+            headerCells.forEach(cell => cell.removeAttribute('data-sort'));
+        }
+
+        function applySort(index, dir) {
+            const tbody = getTbody();
+            if (!tbody) return;
             const rows = Array.from(tbody.querySelectorAll(':scope > tr'));
+            // Same comparator as source_coverage_screen.js (textContent / localeCompare).
             rows.sort((a, b) => {
-                const cellA = (a.children[columnIndex] || {}).textContent || '';
-                const cellB = (b.children[columnIndex] || {}).textContent || '';
-                return ascending
+                const cellA = (a.children[index] || {}).textContent || '';
+                const cellB = (b.children[index] || {}).textContent || '';
+                return dir === 'asc'
                     ? cellA.trim().localeCompare(cellB.trim())
                     : cellB.trim().localeCompare(cellA.trim());
             });
             rows.forEach(row => tbody.appendChild(row));
+        }
+
+        headerCells.forEach((headerCell, index) => {
+            const sortBtn = headerCell.querySelector('.content-view-th__sort-btn');
+            if (!sortBtn) return;
+
+            sortBtn.addEventListener('click', e => {
+                e.stopPropagation();
+                const current = headerCell.getAttribute('data-sort'); // null | 'asc' | 'desc'
+                const next = current === null ? 'asc' : current === 'asc' ? 'desc' : null;
+
+                changeTableState('sorting', () => {
+                    clearSortUI();
+
+                    if (next === null) {
+                        const tbody = getTbody();
+                        if (!tbody) return;
+                        // Reset to server-provided order.
+                        originalRows.forEach(row => tbody.appendChild(row));
+                        sortState = null;
+                        setSortReset(false);
+                    } else {
+                        headerCell.setAttribute('data-sort', next);
+                        applySort(index, next);
+                        sortState = { index, dir: next };
+                        setSortReset(true);
+                    }
+                });
+            });
+        });
+
+        if (sortResetBtn) {
+            sortResetBtn.addEventListener('click', () => {
+                const tbody = getTbody();
+                if (!tbody) return;
+                changeTableState('sorting', () => {
+                    clearSortUI();
+                    originalRows.forEach(row => tbody.appendChild(row));
+                    sortState = null;
+                    setSortReset(false);
+                });
+            });
         }
     }
 

@@ -1,5 +1,7 @@
 # pylint: disable=invalid-name
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.expected_conditions import staleness_of
+from selenium.webdriver.support.ui import WebDriverWait
 from seleniumbase import BaseCase
 
 from strictdoc.helpers.mid import MID
@@ -23,14 +25,24 @@ class Form_EditRequirement(Form):  # pylint: disable=invalid-name
 
     def do_form_add_field_comment(self) -> MID:
         any_comment_xpath = "//*[@data-testid='requirement-form-comment-row']"
+        add_comment_xpath = "//*[@data-testid='form-action-add-comment']"
+
+        # Wait for the inline form's own content to be loaded before
+        # counting existing comment rows: do_open_inline_cell only waits
+        # for data-mode="editing", which is set before the form's fetch
+        # resolves, so this link (and any pre-existing comment rows
+        # rendered alongside it) may not exist yet. Reading comments_number
+        # too early sees 0 and, once the row that is actually the new one
+        # renders after the already-loaded content, misidentifies an
+        # existing row as the new one.
+        self.test_case.find_element(add_comment_xpath, by=By.XPATH)
+
         comments_number = len(
             self.test_case.find_elements(any_comment_xpath, by=By.XPATH)
         )
         new_comment_ordinal_number = comments_number + 1
 
-        self.test_case.click_xpath(
-            "//*[@data-testid='form-action-add-comment']"
-        )
+        self.test_case.click_xpath(add_comment_xpath)
 
         xpath = f"({any_comment_xpath})[{new_comment_ordinal_number}]"
         element = self.test_case.find_element(xpath)
@@ -86,6 +98,12 @@ class Form_EditRequirement(Form):  # pylint: disable=invalid-name
         # TODO: update with mid
         super().do_delete_field("form-field-relation", field_order)
 
+    def do_clear_relation_uid(self, field_order: int = 1) -> None:
+        # Clears the UID input of a relation row that already exists in the document.
+        # Used to verify Case 2: clearing the UID of a saved relation raises a
+        # validation error instead of silently discarding the relation.
+        super().do_clear_field("relation-uid", field_order)
+
     def do_fill_in_field_relation(self, mid: MID, field_value: str) -> None:
         assert isinstance(mid, MID)
         assert isinstance(field_value, str)
@@ -116,6 +134,22 @@ class Form_EditRequirement(Form):  # pylint: disable=invalid-name
             f"form-field-{field_name}", field_value
         )
 
+    def assert_field_autocomplete_no_results(
+        self, field_name: str, field_value: str
+    ) -> None:
+        assert isinstance(field_value, str)
+        super().assert_autocomplete_no_results(
+            f"form-field-{field_name}", field_value
+        )
+
+    def assert_field_autocomplete_no_duplicate_on_click(
+        self, field_name: str, already_selected_value: str
+    ) -> None:
+        assert isinstance(already_selected_value, str)
+        super().assert_autocomplete_no_duplicate_on_click(
+            f"form-field-{field_name}", already_selected_value
+        )
+
     def do_select_relation_role(self, mid: MID, field_value: str) -> None:
         assert isinstance(mid, MID)
         assert isinstance(field_value, str)
@@ -134,6 +168,9 @@ class Form_EditRequirement(Form):  # pylint: disable=invalid-name
     def do_fill_in_field_title(self, field_value: str) -> None:
         assert isinstance(field_value, str)
         super().do_fill_in("TITLE", field_value)
+
+    def do_clear_field_title(self) -> None:
+        super().do_clear_field("TITLE")
 
     def do_fill_in_field_statement(self, field_value: str) -> None:
         assert isinstance(field_value, str)
@@ -171,4 +208,62 @@ class Form_EditRequirement(Form):  # pylint: disable=invalid-name
 
     def do_reset_uid_field(self, field_name: str = "") -> None:
         assert isinstance(field_name, str)
+
+        field_xpath = "(//*[@data-testid='form-field-UID'])"
+        field_element_before_reset = self.test_case.find_element(
+            field_xpath, by=By.XPATH
+        )
+
         self.test_case.click_xpath("//*[@data-testid='reset-uid-field-action']")
+
+        # The reset action triggers an async /reset_uid request whose
+        # response replaces the whole UID row (field + button) via a
+        # turbo-stream action="replace", regardless of whether the
+        # generated UID differs from the previous value (e.g. it stays
+        # empty when the node has no prefix). Wait for the pre-reset field
+        # element to go stale, i.e. for the DOM swap to actually happen,
+        # before returning. Otherwise a caller may submit the form before
+        # the generated UID has been populated.
+        WebDriverWait(self.test_case.driver, timeout=3).until(
+            staleness_of(field_element_before_reset)
+        )
+
+    # Restore UID button
+
+    def assert_uid_field_has_restore_button(self) -> None:
+        self.test_case.assert_element_present(
+            "//*[@data-testid='restore-uid-field-action']",
+            by=By.XPATH,
+        )
+
+    def assert_uid_field_has_not_restore_button(self) -> None:
+        self.test_case.assert_element_not_present(
+            "//*[@data-testid='restore-uid-field-action']",
+            by=By.XPATH,
+        )
+
+    def do_restore_uid_field(self) -> None:
+        # Unlike the reset button, restoring is a plain client-side DOM
+        # update (restorable_field.js), no server round-trip: no need to
+        # wait for a DOM swap, only for the field's text to change.
+        self.test_case.click_xpath(
+            "//*[@data-testid='restore-uid-field-action']"
+        )
+
+    def assert_field_is_readonly(self, field_name: str) -> None:
+        """Verifies that a specific field has contenteditable set to false."""
+        selector = (
+            f"sdoc-contenteditable[data-testid='form-field-{field_name}']"
+        )
+        is_editable = self.test_case.get_attribute(selector, "contenteditable")
+
+        assert is_editable == "false"
+
+    def assert_field_is_editable(self, field_name: str) -> None:
+        """Verifies that a specific field has contenteditable set to true."""
+        selector = (
+            f"sdoc-contenteditable[data-testid='form-field-{field_name}']"
+        )
+        is_editable = self.test_case.get_attribute(selector, "contenteditable")
+
+        assert is_editable == "true"

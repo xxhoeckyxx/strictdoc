@@ -243,7 +243,11 @@
   class SearchResultsView {
     static PAGE_SIZE = 5;
 
-    constructor(dom, { userinput, searchData, documentLevel }) {
+    constructor(dom, {
+      userinput,
+      searchData,
+      documentLevel
+    }) {
       this.userinput = userinput;
       this.searchData = searchData;
       this.documentLevel = documentLevel;
@@ -470,7 +474,11 @@
 
   // Orchestrate user input events and translate them into search updates.
   class SearchInputController {
-    constructor({ userinput, searchData, searchResultsView }) {
+    constructor({
+      userinput,
+      searchData,
+      searchResultsView
+    }) {
       this.userinput = userinput;
       this.searchData = searchData;
       this.searchResultsView = searchResultsView;
@@ -511,8 +519,8 @@
       // the auto-completed quote pair and clear the field completely.
       if (this.previousInputValue === '""' && this.userinput.value === '"') {
         this.userinput.value = ""
-      // If the user has typed a single quote into an otherwise empty field,
-      // auto-insert the matching closing quote.
+        // If the user has typed a single quote into an otherwise empty field,
+        // auto-insert the matching closing quote.
       } else if (this.userinput.value === '"') {
         const quote = this.userinput.value;
         this.userinput.value = quote + quote;
@@ -577,6 +585,15 @@
   // Search index initialization
   // =========================================================================
 
+  function setSearchIndexReady(isReady) {
+    strictDocSearch.isReady = isReady;
+    if (isReady) {
+      window.StrictDoc.bus.emit(
+        window.StrictDoc.events.STATIC_HTML_SEARCH_READY
+      );
+    }
+  }
+
   // Open the IndexedDB database that caches the generated search index.
   function openSearchIndexDB(name, version = 1) {
     return new Promise((resolve, reject) => {
@@ -623,29 +640,18 @@
     });
   }
 
-  // Load the generated search index JavaScript file into the page.
-  function loadScript(url) {
-    return new Promise((resolve, reject) => {
-      const script = document.createElement("script");
-      script.src = url;
-      script.onload = () => {
-        script.remove();
-        resolve();
-      };
-      script.onerror = () => reject(new Error(
-        `Failed to load script ${url}`));
-      document.head.appendChild(script);
-    });
-  }
-
   // Load the generated search index, optionally bypassing the browser cache.
+  // Delivered as a <script src> rather than fetched (see
+  // window.StrictDoc.loadScript in app_core.js): fetch()/XHR to a sibling
+  // file:// URL is blocked by the browser, and static HTML export is
+  // frequently opened directly as a file rather than served over HTTP.
   async function loadSearchIndexFromScript(pathToSearchIndex, cacheBusting) {
     const searchIndexURL = new URL(pathToSearchIndex, window.location.href);
     if (cacheBusting) {
       searchIndexURL.searchParams.set("_refresh", Date.now().toString());
     }
     console.time("Search: LOAD_JS_INDEX");
-    await loadScript(searchIndexURL.href);
+    await window.StrictDoc.loadScript(searchIndexURL.href);
     console.timeEnd("Search: LOAD_JS_INDEX");
     console.log("Search: JS search index loaded successfully.");
   }
@@ -693,6 +699,7 @@
 
       refreshInProgress = true;
       try {
+        setSearchIndexReady(false);
         await loadSearchIndexFromScript(pathToSearchIndex, true);
         await saveCurrentSearchIndexToDB({
           dbName,
@@ -700,6 +707,7 @@
           timestampMeta,
           searchData,
         });
+        setSearchIndexReady(true);
       } catch (refreshError) {
         console.error(
           "Search: Failed to refresh search index after Turbo stream update:",
@@ -823,8 +831,14 @@
   // =========================================================================
 
   // Initialize the UI controllers after all required DOM and meta are present.
-  const { dom, missingSelectors } = collectRequiredDom();
-  const { meta, missingSelectors: missingMetaSelectors } = collectRequiredMeta();
+  const {
+    dom,
+    missingSelectors
+  } = collectRequiredDom();
+  const {
+    meta,
+    missingSelectors: missingMetaSelectors
+  } = collectRequiredMeta();
 
   if (missingSelectors.length > 0) {
     console.assert(
@@ -842,8 +856,15 @@
     return;
   }
 
-  const { userinput } = dom;
+  const {
+    userinput
+  } = dom;
   const documentLevel = parseInt(meta.documentLevel, 10);
+
+  // E2E tests rely on this startup event to type only after the async
+  // generated search index has been loaded.
+  window.StrictDoc.events.STATIC_HTML_SEARCH_READY =
+    "static-html-search:ready";
 
   const searchResultsView = new SearchResultsView(dom, {
     userinput,
@@ -856,6 +877,7 @@
     searchResultsView,
   });
   searchInputController.attachEventListeners();
+  setSearchIndexReady(false);
 
   // Defer search index initialization until the page and generated assets are ready.
   window.addEventListener("load", async () => {
@@ -873,5 +895,8 @@
       timestampMeta,
       searchData: strictDocSearch,
     });
+    if (strictDocSearch.index && strictDocSearch.nodesByMid) {
+      setSearchIndexReady(true);
+    }
   });
 })();

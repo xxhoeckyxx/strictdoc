@@ -11,6 +11,8 @@ from typing import Any, Dict, Iterator, List, Optional, Set, Union
 
 from textx import TextXSyntaxError
 
+from strictdoc.backend.markdown.reader import SDMarkdownReader
+from strictdoc.backend.sdoc.constants import SDocMarkup
 from strictdoc.backend.sdoc.error_handling import StrictDocSemanticError
 from strictdoc.backend.sdoc.models.anchor import Anchor
 from strictdoc.backend.sdoc.models.document import SDocDocument
@@ -71,7 +73,12 @@ from strictdoc.helpers.file_modification_time import (
 )
 from strictdoc.helpers.mid import MID
 from strictdoc.helpers.parallelizer import Parallelizer
-from strictdoc.helpers.timing import measure_performance, timing_decorator
+from strictdoc.helpers.paths import shorten_path
+from strictdoc.helpers.timing import (
+    measure_performance,
+    measure_performance_loop,
+    timing_decorator,
+)
 
 
 class TraceabilityIndexBuilder:
@@ -157,51 +164,55 @@ class TraceabilityIndexBuilder:
 
             source_files = source_tree.source_files
             source_file: SourceFile
-            for source_file in source_files:
-                with measure_performance(
-                    f"Reading source: {source_file.in_doctree_source_file_rel_path}"
-                ):
-                    source_nodes_cfg_entry = (
-                        project_config.get_relevant_source_nodes_entry(
-                            source_file.full_path
-                        )
-                    )
-                    if source_nodes_cfg_entry is not None:
-                        source_node_grammar_element = (
-                            traceability_index.get_grammar_element(
-                                source_nodes_cfg_entry.uid,
-                                source_nodes_cfg_entry.node_type,
+            with measure_performance_loop(
+                "Reading source", len(source_files)
+            ) as report_progress:
+                for source_file in source_files:
+                    with report_progress(
+                        source_file.in_doctree_source_file_rel_path,
+                        short_title=shorten_path(
+                            source_file.in_doctree_source_file_rel_path
+                        ),
+                    ):
+                        source_nodes_cfg_entry = (
+                            project_config.get_relevant_source_nodes_entry(
+                                source_file.full_path
                             )
                         )
-                        assert source_node_grammar_element is not None, (
-                            "Missing grammar element for node: "
-                            f"{source_nodes_cfg_entry.uid} {source_nodes_cfg_entry.node_type}"
-                        )
-                        source_node_tags = (
-                            TraceabilityIndexBuilder.source_node_parser_tags(
+                        if source_nodes_cfg_entry is not None:
+                            source_node_grammar_element = (
+                                traceability_index.get_grammar_element(
+                                    source_nodes_cfg_entry.uid,
+                                    source_nodes_cfg_entry.node_type,
+                                )
+                            )
+                            assert source_node_grammar_element is not None, (
+                                "Missing grammar element for node: "
+                                f"{source_nodes_cfg_entry.uid} {source_nodes_cfg_entry.node_type}"
+                            )
+                            source_node_tags = TraceabilityIndexBuilder.source_node_parser_tags(
                                 source_nodes_cfg_entry,
                                 source_node_grammar_element,
                             )
-                        )
-                    else:
-                        source_node_tags = None
+                        else:
+                            source_node_tags = None
 
-                    traceability_info = (
-                        SourceFileTraceabilityCachingReader.read_from_file(
-                            source_file.full_path,
-                            project_config,
-                            source_node_tags,
+                        traceability_info = (
+                            SourceFileTraceabilityCachingReader.read_from_file(
+                                source_file.full_path,
+                                project_config,
+                                source_node_tags,
+                            )
                         )
-                    )
 
-                if traceability_info:
-                    traceability_index.create_traceability_info(
-                        source_file,
-                        traceability_info,
-                    )
-                    # Is file referenced by backwards links?
-                    if len(traceability_info.markers) > 0:
-                        source_file.is_referenced = True
+                    if traceability_info:
+                        traceability_index.create_traceability_info(
+                            source_file,
+                            traceability_info,
+                        )
+                        # Is file referenced by backwards links?
+                        if len(traceability_info.markers) > 0:
+                            source_file.is_referenced = True
 
             file_tracability_index.validate_and_resolve(
                 traceability_index, project_config
@@ -247,6 +258,24 @@ class TraceabilityIndexBuilder:
                         )
 
             traceability_index.document_tree.attach_source_tree(source_tree)
+
+        #
+        # Resolve pending InlineLinks. This depends on UIDs and anchors from
+        # static documents, generated documents and source nodes.
+        #
+        for inline_link in traceability_index.pending_inline_links:
+            if not traceability_index.graph_database.has_any_link(
+                link_type=GraphLinkType.UID_TO_NODE,
+                lhs_node=inline_link.link,
+            ):
+                raise StrictDocException(
+                    "DocumentIndex: "
+                    "the inline link references an object with an UID "
+                    "that does not exist: "
+                    f"{inline_link.link}."
+                )
+            traceability_index.create_inline_link(inline_link)
+        traceability_index.pending_inline_links.clear()
 
         #
         # Resolve all modification dates to support the incremental generation of
@@ -432,6 +461,9 @@ class TraceabilityIndexBuilder:
             # this point.
             document.grammar.parent = document
 
+            if document.config.markup == SDocMarkup.MARKDOWN:
+                SDMarkdownReader.fixup_composite_nodes(document)
+
             try:
                 SDocValidator.validate_document(document)
             except StrictDocSemanticError as exc:
@@ -592,6 +624,12 @@ class TraceabilityIndexBuilder:
 
             document_iterator = d_01_document_iterators[document]
 
+            if document.config.custom_metadata is not None:
+                for metadata_entry_ in document.config.custom_metadata.entries:
+                    for part in metadata_entry_.parts:
+                        if isinstance(part, InlineLink):
+                            traceability_index.pending_inline_links.append(part)
+
             for node, _ in document_iterator.all_content(
                 print_fragments=False,
             ):
@@ -599,27 +637,10 @@ class TraceabilityIndexBuilder:
                     continue
 
                 requirement = assert_cast(node, SDocNode)
-
-                #
-                # At this point, we resolve LINKs, and the expectation is that
-                # all UIDs or ANCHORS (they also have UIDs) are registered at the
-                # previous pass.
-                #
                 for node_field_ in requirement.enumerate_fields():
                     for part in node_field_.parts:
                         if isinstance(part, InlineLink):
-                            if not graph_database.has_any_link(
-                                link_type=GraphLinkType.UID_TO_NODE,
-                                lhs_node=part.link,
-                            ):
-                                raise StrictDocException(
-                                    "DocumentIndex: "
-                                    "the inline link references an "
-                                    "object with an UID "
-                                    "that does not exist: "
-                                    f"{part.link}."
-                                )
-                            traceability_index.create_inline_link(part)
+                            traceability_index.pending_inline_links.append(part)
                 if requirement.reserved_uid is None:
                     continue
 

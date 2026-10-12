@@ -2,14 +2,19 @@
 @relation(SDOC-SRS-55, scope=file)
 """
 
-import re
-
 from collections import defaultdict
 from enum import Enum
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
-from starlette.datastructures import FormData, UploadFile
+from starlette.datastructures import FormData
 
+from strictdoc.backend.markdown.markdown_to_html_fragment_writer import (
+    MarkdownToHtmlFragmentWriter,
+)
+from strictdoc.backend.rst.rst_to_html_fragment_writer import (
+    RstToHtmlFragmentWriter,
+)
+from strictdoc.backend.sdoc.constants import SDocMarkup
 from strictdoc.backend.sdoc.errors.document_tree_error import DocumentTreeError
 from strictdoc.backend.sdoc.models.document import SDocDocument
 from strictdoc.backend.sdoc.models.document_grammar import (
@@ -39,9 +44,6 @@ from strictdoc.core.traceability_index import (
     TraceabilityIndex,
 )
 from strictdoc.core.tree_cycle_detector import SingleShotTreeCycleDetector
-from strictdoc.export.rst.rst_to_html_fragment_writer import (
-    RstToHtmlFragmentWriter,
-)
 from strictdoc.helpers.auto_described import auto_described
 from strictdoc.helpers.cast import assert_cast
 from strictdoc.helpers.form_data import ParsedFormData, parse_form_data
@@ -50,24 +52,44 @@ from strictdoc.helpers.string import sanitize_html_form_field
 from strictdoc.server.error_object import ErrorObject
 
 
-UID_ALLOWED_CHARS_RE = re.compile(r"^[\w]+[\w()\-\/:. ]*$")
-# UID_ALLOWED_CHARS_RE = re.compile(r"^[A-Za-z0-9_]+[A-Za-z0-9_()\-\/:. ]*$")
-
-
 class RequirementFormFieldType(str, Enum):
     SINGLELINE = "SINGLELINE"
     MULTILINE = "MULTILINE"
+
+
+def deduplicate_comma_separated_value(value: str) -> str:
+    """
+    MultipleChoice/Tag field values are a comma-separated set. Existing
+    documents can already contain duplicate entries (hand-edited, or
+    created before the autocomplete duplicate-prevention fix). Remove the
+    duplicates here, case-insensitively, keeping the order and casing of
+    the first occurrence.
+    """
+    seen: Set[str] = set()
+    deduplicated_parts: List[str] = []
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        key = part.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated_parts.append(part)
+    return ", ".join(deduplicated_parts)
 
 
 @auto_described
 class RequirementFormField:
     def __init__(
         self,
+        *,
         field_mid: str,
         field_name: str,
         field_type: RequirementFormFieldType,
         field_value: str,
         field_gef_type: str = RequirementFieldType.STRING,
+        is_editable: bool = True,
     ) -> None:
         assert isinstance(field_value, str)
         self.field_mid: str = field_mid
@@ -75,6 +97,7 @@ class RequirementFormField:
         self.field_value: str = field_value
         self.field_type = field_type
         self.field_gef_type: str = field_gef_type
+        self.is_editable = is_editable
 
     def is_multiline(self) -> bool:
         return self.field_type == RequirementFormFieldType.MULTILINE
@@ -142,6 +165,16 @@ class RequirementFormField:
             RequirementFieldType.TAG,
         ):
             field_value = requirement_field.get_text_value()
+            if grammar_field.gef_type in (
+                RequirementFieldType.MULTIPLE_CHOICE,
+                RequirementFieldType.TAG,
+            ):
+                # The document may already contain duplicate values (e.g.
+                # hand-edited, or saved before the autocomplete
+                # duplicate-prevention fix). Deduplicate when loading the
+                # value into the edit form, so saving the form as-is
+                # cleans up the document.
+                field_value = deduplicate_comma_separated_value(field_value)
             return RequirementFormField(
                 field_mid=MID.create(),
                 field_name=grammar_field.title,
@@ -152,6 +185,7 @@ class RequirementFormField:
                 ),
                 field_value=field_value,
                 field_gef_type=grammar_field.gef_type,
+                is_editable=requirement_field.is_document_origin(),
             )
         raise NotImplementedError(grammar_field)
 
@@ -169,6 +203,10 @@ class RequirementReferenceFormField:
         field_type: FieldType,
         field_value: str,
         field_role: Optional[str],
+        # True for relation rows added client-side (never saved to the document).
+        # False (default) for rows that were already saved and loaded into the form.
+        # Used to distinguish "silently discard if empty" vs. "raise error if empty".
+        is_new: bool = False,
     ) -> None:
         assert isinstance(field_mid, str), field_mid
         assert isinstance(field_value, str), field_value
@@ -178,6 +216,7 @@ class RequirementReferenceFormField:
         self.field_role: str = (
             field_role if field_role is not None and len(field_role) > 0 else ""
         )
+        self.is_new: bool = is_new
         self.validation_messages: List[str] = []
 
     def get_input_field_name(self) -> str:
@@ -188,6 +227,10 @@ class RequirementReferenceFormField:
 
     def get_type_field_name(self) -> str:
         return f"requirement[relations][{self.field_mid}][typerole]"
+
+    def get_is_new_field_name(self) -> str:
+        return f"requirement[relations][{self.field_mid}][is_new]"
+
 
 @auto_described
 class RequirementFormObject(ErrorObject):
@@ -215,6 +258,7 @@ class RequirementFormObject(ErrorObject):
         grammar: DocumentGrammar,
         # FIXME: Better name.
         relation_types: List[str],
+        document_markup: str,
     ) -> None:
         super().__init__()
         assert isinstance(element_type, str), element_type
@@ -237,6 +281,11 @@ class RequirementFormObject(ErrorObject):
         self.existing_requirement_uid: Optional[str] = existing_requirement_uid
         self.grammar: DocumentGrammar = grammar
         self.relation_types: List[str] = relation_types
+        # Set by validate() when a UID rename is rejected because the
+        # requirement still has parent/child relations, so the template can
+        # offer a button to restore existing_requirement_uid into the field.
+        self.uid_rename_blocked_by_relations: bool = False
+        self.document_markup: str = document_markup
 
     @staticmethod
     def create_from_request(
@@ -247,14 +296,10 @@ class RequirementFormObject(ErrorObject):
         document: SDocDocument,
         existing_requirement_uid: Optional[str],
     ) -> "RequirementFormObject":
-        # Only forward simple string fields to parse_form_data.
-        request_form_data_as_list: List[Tuple[str, str]] = []
-        for field_name, field_value in request_form_data.multi_items():
-            if isinstance(field_value, UploadFile):
-                # File uploads are not handled by the requirement form parser.
-                continue
-            request_form_data_as_list.append((field_name, field_value))
-
+        request_form_data_as_list = [
+            (field_name, field_value)
+            for field_name, field_value in request_form_data.multi_items()
+        ]
         request_form_dict: ParsedFormData = assert_cast(
             parse_form_data(request_form_data_as_list), dict
         )
@@ -298,6 +343,15 @@ class RequirementFormObject(ErrorObject):
             }[relation_type]
 
             relation_value = relation_dict["value"].strip()
+
+            if len(relation_value) == 0 and relation_type != "File":
+                # is_new distinguishes two empty-UID cases:
+                # - True: user added a row but left it blank → silently discard.
+                # - False: user cleared the UID of an existing saved relation
+                #          → keep the field so validate() can raise the error.
+                is_new_relation = relation_dict.get("is_new", "false") == "true"
+                if is_new_relation:
+                    continue
 
             form_ref_fields.append(
                 RequirementReferenceFormField(
@@ -345,6 +399,7 @@ class RequirementFormObject(ErrorObject):
             existing_requirement_uid=existing_requirement_uid,
             grammar=grammar,
             relation_types=element.get_relation_types(),
+            document_markup=document.config.markup or SDocMarkup.RST,
         )
         return form_object
 
@@ -385,7 +440,16 @@ class RequirementFormObject(ErrorObject):
             form_fields.append(form_field)
             if form_field.field_name == "UID" and next_uid is not None:
                 form_field.field_value = next_uid
-            elif form_field.field_name == "MID" and document.config.enable_mid:
+            elif form_field.field_name == "MID" and (
+                document.config.enable_mid
+                or (
+                    "MID" in element.fields_map
+                    and document.meta is not None
+                    and document.meta.input_doc_full_path.lower().endswith(
+                        (".md", ".markdown")
+                    )
+                )
+            ):
                 form_field.field_value = new_requirement_mid.get_string_value()
 
         return RequirementFormObject(
@@ -400,6 +464,7 @@ class RequirementFormObject(ErrorObject):
             existing_requirement_uid=None,
             grammar=grammar,
             relation_types=element.get_relation_types(),
+            document_markup=document.config.markup or SDocMarkup.RST,
         )
 
     @staticmethod
@@ -490,6 +555,7 @@ class RequirementFormObject(ErrorObject):
             existing_requirement_uid=requirement.reserved_uid,
             grammar=grammar,
             relation_types=grammar_element_relations,
+            document_markup=document.config.markup or SDocMarkup.RST,
         )
 
     @staticmethod
@@ -507,13 +573,25 @@ class RequirementFormObject(ErrorObject):
                 context_document_mid=context_document_mid,
             )
         )
+        grammar = document.grammar
+        assert grammar is not None
+        grammar_element = grammar.elements_by_type[requirement.node_type]
         form_object.requirement_mid = MID.create()
         for field_name, fields_ in form_object.fields.items():
             field: RequirementFormField
             if field_name == "UID":
                 field = fields_[0]
                 field.field_value = clone_uid
-            elif field_name == "MID" and document.config.enable_mid:
+            elif field_name == "MID" and (
+                document.config.enable_mid
+                or (
+                    "MID" in grammar_element.fields_map
+                    and document.meta is not None
+                    and document.meta.input_doc_full_path.lower().endswith(
+                        (".md", ".markdown")
+                    )
+                )
+            ):
                 field = fields_[0]
                 field.field_value = (
                     form_object.requirement_mid.get_string_value()
@@ -673,17 +751,6 @@ class RequirementFormObject(ErrorObject):
         if "UID" in self.fields:
             new_node_uid = self.fields["UID"][0].field_value
             if len(new_node_uid) > 0:
-                # Enforce the same character set as the SDoc grammar
-                # (see TextX pattern '([\w]+[\w()\-\/:. ]*)')
-                if UID_ALLOWED_CHARS_RE.match(new_node_uid) is None:
-                    self.add_error(
-                        "UID",
-                        (
-                            "UID contains invalid characters. Allowed "
-                            "characters are letters, digits, underscore, "
-                            "parentheses, '-', '/', '.', ':', and spaces."
-                        ),
-                    )
                 new_node_uid_or_none = new_node_uid
 
         if new_node_uid_or_none is not None and (
@@ -738,28 +805,50 @@ class RequirementFormObject(ErrorObject):
                 if grammar_element_field_.title not in self.fields:
                     continue
 
-                for form_field_ in self.fields[grammar_element_field_.title]:
+                field_instances = self.fields[grammar_element_field_.title]
+                is_multi_instance = len(field_instances) > 1
+                for form_field_ in field_instances:
                     field_value = form_field_.field_value
+                    # Multi-instance fields (e.g. COMMENT) key errors by field_mid
+                    # so each row only shows its own errors.
+                    error_key = (
+                        form_field_.field_mid
+                        if is_multi_instance
+                        else grammar_element_field_.title
+                    )
 
-                    # If field not empty, validate its RST syntax.
+                    # If field not empty, validate its markup syntax using the
+                    # writer that matches the document's markup (RST by
+                    # default, Markdown for Markdown documents).
                     if len(field_value) > 0:
-                        (
-                            parsed_html,
-                            rst_error,
-                        ) = RstToHtmlFragmentWriter(
-                            project_config=config,
-                            context_document=context_document,
-                        ).write_with_validation(field_value)
-                        if parsed_html is None:
-                            assert rst_error is not None
-                            self.add_error(
-                                grammar_element_field_.title, rst_error
+                        markup = (
+                            context_document.config.markup
+                            if context_document is not None
+                            else None
+                        )
+                        if markup == SDocMarkup.MARKDOWN:
+                            (
+                                parsed_html,
+                                markup_error,
+                            ) = MarkdownToHtmlFragmentWriter.write_with_validation(
+                                field_value
                             )
+                        else:
+                            (
+                                parsed_html,
+                                markup_error,
+                            ) = RstToHtmlFragmentWriter(
+                                project_config=config,
+                                context_document=context_document,
+                            ).write_with_validation(field_value)
+                        if parsed_html is None:
+                            assert markup_error is not None
+                            self.add_error(error_key, markup_error)
                     # If field is empty, check if required and validate for emptiness.
                     else:
                         if grammar_element_field_.required:
                             self.add_error(
-                                grammar_element_field_.title,
+                                error_key,
                                 (
                                     f"Node's {grammar_element_field_.title} must not be empty. "
                                     f"If there is no appropriate value for this field yet, "
@@ -777,7 +866,15 @@ class RequirementFormObject(ErrorObject):
         requirement_uid: Optional[str] = (
             self.fields["UID"][0].field_value if "UID" in self.fields else None
         )
-        if len(self.reference_fields) > 0 and (
+        has_requirement_relations = any(
+            reference_field.field_type
+            in (
+                RequirementReferenceFormField.FieldType.PARENT,
+                RequirementReferenceFormField.FieldType.CHILD,
+            )
+            for reference_field in self.reference_fields
+        )
+        if has_requirement_relations and (
             requirement_uid is None or len(requirement_uid) == 0
         ):
             self.add_error(
@@ -791,7 +888,7 @@ class RequirementFormObject(ErrorObject):
             self.existing_requirement_uid is not None
             and self.existing_requirement_uid != requirement_uid
         ):
-            if len(self.reference_fields) > 0:
+            if has_requirement_relations:
                 self.add_error(
                     "UID",
                     "Not supported yet: "
@@ -799,6 +896,7 @@ class RequirementFormObject(ErrorObject):
                     "parent requirement relations. For now, manually delete the "
                     "relations, rename the UID, recreate the relations.",
                 )
+                self.uid_rename_blocked_by_relations = True
 
             existing_node = assert_cast(
                 traceability_index.get_node_by_uid_weak(
@@ -815,36 +913,13 @@ class RequirementFormObject(ErrorObject):
                     "child requirement relations. For now, manually delete the "
                     "relations, rename the UID, recreate the relations.",
                 )
+                self.uid_rename_blocked_by_relations = True
                 return
-
-        # Validate relation types/roles against the grammar for this element.
-        if len(self.reference_fields) > 0:
-            node_grammar_element: GrammarElement = (
-                self.grammar.elements_by_type[self.element_type]
-            )
-            for reference_field in self.reference_fields:
-                field_role_or_none = (
-                    reference_field.field_role
-                    if reference_field.field_role is not None
-                    and len(reference_field.field_role) > 0
-                    else None
-                )
-                if not node_grammar_element.has_relation_type_role(
-                    relation_type=reference_field.field_type,
-                    relation_role=field_role_or_none,
-                ):
-                    reference_field.validation_messages.append(
-                        "Relation type/role is not allowed for this "
-                        "element by the document grammar.",
-                    )
 
         if requirement_uid is not None:
             relation_target_uids_so_far: Set[str] = set()
             for reference_field in self.reference_fields:
-                if reference_field.field_type in (
-                    RequirementReferenceFormField.FieldType.PARENT,
-                    RequirementReferenceFormField.FieldType.CHILD,
-                ):
+                if reference_field.field_type in ("Parent", "Child"):
                     link_uid = reference_field.field_value
                     if len(link_uid) == 0:
                         reference_field.validation_messages.append(
@@ -868,22 +943,24 @@ class RequirementFormObject(ErrorObject):
                         continue
                     relation_target_uids_so_far.add(link_uid)
 
-                    # For parent/child relations, only run cycle detection
-                    # when the grammar actually allows this relation.
-                    node_grammar_element = self.grammar.elements_by_type[
-                        self.element_type
-                    ]
+                    # Check if the target document supports a given relation.
+                    node_grammar_element: GrammarElement = (
+                        self.grammar.elements_by_type[self.element_type]
+                    )
                     field_role_or_none = (
                         reference_field.field_role
                         if reference_field.field_role is not None
                         and len(reference_field.field_role) > 0
                         else None
                     )
-                    if not node_grammar_element.has_relation_type_role(
-                        relation_type=reference_field.field_type,
-                        relation_role=field_role_or_none,
-                    ):
-                        continue
+
+                    # This is not a realistic case to happen when a node is
+                    # edited in UI because the UI dropdown element whitelists
+                    # the available relation types.
+                    # Using an assert anyway just to make sure.
+                    assert node_grammar_element.has_relation_type_role(
+                        reference_field.field_type, field_role_or_none
+                    )
 
                     self._validate_no_cycle_by_new_node(
                         traceability_index, reference_field, requirement_uid
@@ -935,8 +1012,7 @@ class RequirementFormObject(ErrorObject):
 
         relations_lambda = (
             parent_lambda
-            if reference_field.field_type
-            == RequirementReferenceFormField.FieldType.PARENT
+            if reference_field.field_type == "Parent"
             else child_lambda
         )
 
@@ -956,8 +1032,17 @@ class RequirementFormObject(ErrorObject):
         self, grammar_element_field: GrammarElementField
     ) -> None:
         field_0 = self.fields[grammar_element_field.title][0]
-        if len(field_0.field_value) == 0 and not grammar_element_field.required:
-            # The empty choice fields are allowed if the field is not REQUIRED.
+        if len(field_0.field_value) == 0:
+            if grammar_element_field.required:
+                self.add_error(
+                    grammar_element_field.title,
+                    (
+                        f"Node's {grammar_element_field.title} must not be empty. "
+                        f"If there is no appropriate value for this field yet, "
+                        f"enter TBD (to be done)."
+                    ),
+                )
+            # Empty non-required fields are valid.
             return
 
         choice_grammar_element_field: Union[
@@ -973,6 +1058,7 @@ class RequirementFormObject(ErrorObject):
         if (
             grammar_element_field.gef_type == RequirementFieldType.SINGLE_CHOICE
             and field_0.field_value not in choice_grammar_element_field.options
+            and field_0.field_value not in ("TBD", "TBC")
         ):
             self.add_error(
                 grammar_element_field.title,
@@ -990,6 +1076,7 @@ class RequirementFormObject(ErrorObject):
             ]
             if all(
                 choice in choice_grammar_element_field.options
+                or choice in ("TBD", "TBC")
                 for choice in choices
             ):
                 field_0.field_value = ", ".join(choices)

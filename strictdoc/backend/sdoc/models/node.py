@@ -94,8 +94,29 @@ class SDocNodeField:
             multiline__="multiline" if multiline else None,
         )
 
+    @staticmethod
+    def from_parts(
+        parent: Optional["SDocNode"],
+        field_name: str,
+        parts: List[Any],
+        multiline: bool,
+    ) -> "SDocNodeField":
+        sdoc_node_field = SDocNodeField(
+            parent=parent,
+            field_name=field_name,
+            parts=parts,
+            multiline__="multiline" if multiline else None,
+        )
+        for part in parts:
+            if isinstance(part, (InlineLink, Anchor)):
+                part.parent = sdoc_node_field
+        return sdoc_node_field
+
     def is_multiline(self) -> bool:
         return self.multiline
+
+    def get_owning_node(self) -> Optional["SDocNode"]:
+        return self.parent
 
     def get_text_value(self) -> str:
         text = ""
@@ -111,7 +132,7 @@ class SDocNodeField:
                 text += part.value
                 if part.has_title:
                     text += ", "
-                    text += part.title
+                    text += part.get_source_title()
                 text += "]"
                 text += "\n"
             else:
@@ -133,6 +154,7 @@ class SDocNode(SDocNodeIF):
 
     def __init__(
         self,
+        *,
         parent: Union[SDocDocumentIF, SDocNodeIF],
         node_type: str,
         fields: List[SDocNodeField],
@@ -265,11 +287,29 @@ class SDocNode(SDocNodeIF):
         node.ng_including_document_reference = DocumentReference()
         node.ng_document_reference = DocumentReference()
         node.ng_document_reference.set_document(document)
-        node.set_field_value(
-            field_name="TITLE",
-            form_field_index=0,
-            value=title,
-        )
+        if (
+            document.grammar is not None
+            and "SECTION" in document.grammar.elements_by_type
+        ):
+            node.set_field_value(
+                field_name="TITLE",
+                form_field_index=0,
+                value=title,
+            )
+        else:
+            # The grammar does not have SECTION yet (e.g., a custom grammar
+            # stub whose file has not been loaded at parse time).
+            # Store TITLE directly; SDocValidator will validate the node type
+            # once the grammar is fully loaded.
+            if title:
+                node.ordered_fields_lookup["TITLE"] = [
+                    SDocNodeField.create_from_string(
+                        node,
+                        field_name="TITLE",
+                        field_value=title,
+                        multiline=False,
+                    )
+                ]
         return node
 
     @staticmethod
@@ -410,7 +450,7 @@ class SDocNode(SDocNodeIF):
             RequirementFieldName.RATIONALE, singleline_only=False
         )
 
-    def is_requirement(self) -> bool:
+    def is_content_node(self) -> bool:
         return True
 
     def is_normative_node(self) -> bool:
@@ -419,7 +459,7 @@ class SDocNode(SDocNodeIF):
     def is_text_node(self) -> bool:
         return self.node_type == "TEXT"
 
-    def is_document(self) -> bool:
+    def is_document_node(self) -> bool:
         return False
 
     def get_document(self) -> Optional[SDocDocumentIF]:
@@ -676,6 +716,25 @@ class SDocNode(SDocNodeIF):
 
         return self.get_prefix()
 
+    def is_managed_by_source_code(self) -> bool:
+        """
+        Helper method to check if a node is partially managed by source code.
+        """
+
+        # Is the node entirely generated from source code?
+        if self.autogen:
+            return True
+
+        # Check if fields were merged from source-files.
+        for field_list in self.ordered_fields_lookup.values():
+            for field in field_list:
+                # If any field did not originate from the document,
+                # the node's content is partially managed by source code...
+                if not field.is_document_origin():
+                    return True
+
+        return False
+
     def dump_fields_as_parsed(self) -> str:
         # FIXME:
         # - The name of the method can be improved (used in error messages).
@@ -749,6 +808,16 @@ class SDocNode(SDocNodeIF):
         multiline = element.is_field_multiline(field_name)
         if multiline and isinstance(value, str):
             value = ensure_newline(value)
+        elif (
+            multiline
+            and isinstance(value, SDocNodeField)
+            and len(value.parts) > 0
+        ):
+            last_part = value.parts[-1]
+            if isinstance(last_part, str):
+                value.parts[-1] = ensure_newline(last_part)
+            elif isinstance(last_part, InlineLink):
+                value.parts.append("\n")
 
         if field_name in self.ordered_fields_lookup:
             if len(self.ordered_fields_lookup[field_name]) > form_field_index:
@@ -823,4 +892,4 @@ class SDocCompositeNode(SDocNode):
         parent: Union[SDocDocumentIF, SDocNodeIF],
         **fields: Any,
     ) -> None:
-        super().__init__(parent, **fields, is_composite=True)
+        super().__init__(parent=parent, **fields, is_composite=True)

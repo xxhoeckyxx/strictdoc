@@ -6,6 +6,7 @@ from strictdoc.backend.markdown.reader import SDMarkdownReader
 from strictdoc.backend.markdown.writer import SDMarkdownWriter
 from strictdoc.backend.sdoc.constants import SDocMarkup
 from strictdoc.backend.sdoc.models.document import SDocDocument
+from strictdoc.backend.sdoc.models.inline_link import InlineLink
 from strictdoc.backend.sdoc.models.node import SDocNode
 from strictdoc.backend.sdoc.reader import SDReader
 
@@ -120,12 +121,11 @@ Intro text.
 
     assert isinstance(document, SDocDocument)
     assert document.title == "Document title"
-    assert document.ng_markdown_meta_style == "backslash"
     assert document.config.markup == SDocMarkup.MARKDOWN
 
     assert document.config.custom_metadata is not None
     metadata = {
-        entry.key: entry.value
+        entry.key: entry.get_text_value()
         for entry in document.config.custom_metadata.entries
     }
     assert metadata == {"UID": "DOC-1", "Author": "John Doe"}
@@ -143,29 +143,34 @@ Intro text.
     assert requirement.reserved_uid == "REQ-1"
 
 
-def test_004_roundtrip_keeps_detected_bullet_meta_style():
+def test_003_1_roundtrip_root_metadata_link():
     input_markdown = """\
 # Document title
 
-## Requirement title
-
-- **UID**: REQ-1
-- **Status**: Draft
-
-System shall do X.
-"""
-    expected_markdown = """\
-# Document title
+**UID**: DOC-1 \\
+**Owner**: [LINK: REQ-1]
 
 ## Requirement title
 
-- **UID**: REQ-1
-- **Status**: Draft
+**UID**: REQ-1
 
 **Statement**: System shall do X.
 """
 
-    _assert_markdown_roundtrip(input_markdown, expected_markdown)
+    document, _ = _assert_markdown_roundtrip(input_markdown)
+
+    assert isinstance(document, SDocDocument)
+    assert document.config.custom_metadata is not None
+    owner_entry = document.config.custom_metadata.entries[-1]
+    assert owner_entry.key == "Owner"
+    assert len(owner_entry.parts) == 1
+    assert isinstance(owner_entry.parts[0], InlineLink)
+    assert owner_entry.parts[0].link == "REQ-1"
+
+    # Regression: the parent chain must be wired so that InlineLink.parent_node()
+    # (used by the incoming-links UI panel and validations) does not crash.
+    assert owner_entry.get_owning_node() is document
+    assert owner_entry.parts[0].parent_node() is document
 
 
 def test_005_roundtrip_keeps_detected_backslash_meta_style():
@@ -189,31 +194,6 @@ System shall do X.
 
 **Statement**: System shall do X.
 """
-
-    _assert_markdown_roundtrip(input_markdown, expected_markdown)
-
-
-def test_006_roundtrip_keeps_detected_two_space_meta_style():
-    input_markdown = """\
-# Document title
-
-## Requirement title
-
-**UID**: REQ-1{br}
-**Status**: Draft{br}
-
-System shall do X.
-""".replace("{br}", "  ")
-    expected_markdown = """\
-# Document title
-
-## Requirement title
-
-**UID**: REQ-1{br}
-**Status**: Draft{br}
-
-**Statement**: System shall do X.
-""".replace("{br}", "  ")
 
     _assert_markdown_roundtrip(input_markdown, expected_markdown)
 
@@ -393,25 +373,6 @@ line 2
     assert requirement.node_type == "REQUIREMENT"
 
 
-def test_013_roundtrip_mixed_meta_styles_as_section():
-    input_markdown = """\
-# Document title
-
-## Requirement title
-
-- **UID**: REQ-1
-**Status**: Draft \\
-
-System shall do X.
-"""
-
-    document, _ = _assert_markdown_roundtrip(input_markdown)
-
-    section_node = document.section_contents[0]
-    assert isinstance(section_node, SDocNode)
-    assert section_node.node_type == "SECTION"
-
-
 def test_014_roundtrip_explicit_and_implicit_content_fields():
     input_markdown = """\
 # Document title
@@ -445,20 +406,14 @@ System shall do X.
     assert requirement.reserved_statement.strip() == "System shall do X."
     assert requirement.rationale == "Because it is needed."
 
-    requirement_element = document.grammar.elements_by_type["REQUIREMENT"]
-    assert (
-        requirement_element.fields_map["RATIONALE"].human_title == "Rationale"
-    )
 
-
-def test_015_roundtrip_relation_with_role():
+def test_015b_roundtrip_relation_with_role():
     input_markdown = """\
 # Document title
 
 ## Requirement
 
 **UID**: REQ-3
-
 **Relations**:
 - **Type**: `Parent` \\
   **ID**: `REQ-1`
@@ -474,7 +429,6 @@ Requirement shall do B.
 ## Requirement
 
 **UID**: REQ-3
-
 **Relations**:
 - **Type**: `Parent` \\
   **ID**: `REQ-1`
@@ -501,8 +455,7 @@ Parent requirement statement.
 ## Child requirement
 
 **UID**: REQ-CHILD
-
-**RELATIONS**:
+**Relations**:
 - **Type**: Parent
   **ID**: REQ-PARENT
 
@@ -511,8 +464,7 @@ Child requirement statement.
 ## Parent with child relation
 
 **UID**: REQ-PARENT-EXPLICIT-CHILD
-
-**RELATIONS**:
+**Relations**:
 - **Type**: Child
   **ID**: REQ-CHILD
 
@@ -521,8 +473,7 @@ Parent with explicit child relation.
 ## File relation C function
 
 **UID**: REQ-FILE-C
-
-**RELATIONS**:
+**Relations**:
 - **Type**: File
   **Path**: file.c
   **Element**: function
@@ -533,8 +484,7 @@ File relation to C function.
 ## File relation Python class
 
 **UID**: REQ-FILE-PY
-
-**RELATIONS**:
+**Relations**:
 - **Type**: File
   **Path**: file.py
   **Element**: class
@@ -545,8 +495,7 @@ File relation to Python class.
 ## File relation Rust no element
 
 **UID**: REQ-FILE-RUST
-
-**RELATIONS**:
+**Relations**:
 - **Type**: File
   **Path**: file.rs
   **ID**: my_function
@@ -556,8 +505,7 @@ File relation to Rust function without element annotation.
 ## File relation line range
 
 **UID**: REQ-FILE-LINE-RANGE
-
-**RELATIONS**:
+**Relations**:
 - **Type**: File
   **Path**: file.c
   **Lines**: `10, 20`
@@ -567,8 +515,7 @@ File relation to a line range.
 ## Requirement with multiple relations
 
 **UID**: REQ-MULTI
-
-**RELATIONS**:
+**Relations**:
 - **Type**: Parent
   **ID**: REQ-PARENT
 - **Type**: Parent
@@ -591,7 +538,6 @@ Multiple relations of different types.
 ## Child requirement
 
 **UID**: REQ-CHILD
-
 **Relations**:
 - **Type**: `Parent` \\
   **ID**: `REQ-PARENT`
@@ -601,7 +547,6 @@ Multiple relations of different types.
 ## Parent with child relation
 
 **UID**: REQ-PARENT-EXPLICIT-CHILD
-
 **Relations**:
 - **Type**: `Child` \\
   **ID**: `REQ-CHILD`
@@ -611,7 +556,6 @@ Multiple relations of different types.
 ## File relation C function
 
 **UID**: REQ-FILE-C
-
 **Relations**:
 - **Type**: `File` \\
   **Path**: `file.c` \\
@@ -623,7 +567,6 @@ Multiple relations of different types.
 ## File relation Python class
 
 **UID**: REQ-FILE-PY
-
 **Relations**:
 - **Type**: `File` \\
   **Path**: `file.py` \\
@@ -635,7 +578,6 @@ Multiple relations of different types.
 ## File relation Rust no element
 
 **UID**: REQ-FILE-RUST
-
 **Relations**:
 - **Type**: `File` \\
   **Path**: `file.rs` \\
@@ -646,7 +588,6 @@ Multiple relations of different types.
 ## File relation line range
 
 **UID**: REQ-FILE-LINE-RANGE
-
 **Relations**:
 - **Type**: `File` \\
   **Path**: `file.c` \\
@@ -657,7 +598,6 @@ Multiple relations of different types.
 ## Requirement with multiple relations
 
 **UID**: REQ-MULTI
-
 **Relations**:
 - **Type**: `Parent` \\
   **ID**: `REQ-PARENT`
@@ -693,7 +633,7 @@ STATEMENT: System shall do X.
 
 **UID**: REQ-1
 
-**STATEMENT**: System shall do X.
+**Statement**: System shall do X.
 """,
         ),
         (
@@ -713,9 +653,9 @@ STATEMENT: System shall do X.
 ## Requirement title
 
 **UID**: REQ-1 \\
-**STATUS**: Draft
+**Status**: Draft
 
-**STATEMENT**: System shall do X.
+**Statement**: System shall do X.
 """,
         ),
         (
@@ -739,14 +679,13 @@ RELATIONS:
 ## Child requirement
 
 **UID**: REQ-3
-
 **Relations**:
 - **Type**: `Parent` \\
   **ID**: `REQ-1`
 - **Type**: `Parent` \\
   **ID**: `REQ-2`
 
-**STATEMENT**: Child requirement shall do B.
+**Statement**: Child requirement shall do B.
 """,
         ),
         (
@@ -769,13 +708,12 @@ RELATIONS:
 ## Parent requirement
 
 **UID**: REQ-1
-
 **Relations**:
 - **Type**: `Child` \\
   **ID**: `REQ-2` \\
   **Role**: `Refines`
 
-**STATEMENT**: Parent requirement shall do A.
+**Statement**: Parent requirement shall do A.
 """,
         ),
     ],
@@ -784,3 +722,594 @@ def test_017_sdoc_to_markdown_roundtrip(
     input_sdoc: str, expected_markdown: str
 ):
     _assert_sdoc_to_markdown_roundtrip(input_sdoc, expected_markdown)
+
+
+# ---------------------------------------------------------------------------
+# TYPE field tests
+# ---------------------------------------------------------------------------
+
+
+def test_018_type_section_input_is_parsed_as_section():
+    """**Type**: SECTION in input creates a SECTION; writer drops TYPE for default grammar."""
+    input_markdown = """\
+# Document title
+
+## Test Section
+
+**Type**: SECTION
+"""
+    # With the default grammar, TYPE is never written back by the writer.
+    expected_markdown = """\
+# Document title
+
+## Test Section
+"""
+    document, _ = _assert_markdown_roundtrip(input_markdown, expected_markdown)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert section.reserved_title == "Test Section"
+    # No TEXT child: the **Type**: line must not become prose.
+    assert len(section.section_contents) == 0
+
+
+def test_019_type_section_with_body_strips_type_line():
+    """**Type**: SECTION with a body: TYPE is dropped in output, body text is preserved."""
+    input_markdown = """\
+# Document title
+
+## Test Section
+
+**Type**: SECTION
+
+Informative text.
+"""
+    expected_markdown = """\
+# Document title
+
+## Test Section
+
+Informative text.
+"""
+    document, _ = _assert_markdown_roundtrip(input_markdown, expected_markdown)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert len(section.section_contents) == 1
+
+    text_node = section.section_contents[0]
+    assert isinstance(text_node, SDocNode)
+    assert text_node.node_type == "TEXT"
+    assert text_node.reserved_statement is not None
+    assert "Informative text." in text_node.reserved_statement
+    # The raw **Type**: line must not appear in the text body.
+    assert "**TYPE**" not in text_node.reserved_statement
+
+
+def test_020_type_requirement_in_default_grammar_strips_type():
+    """
+    **Type**: REQUIREMENT in a default-grammar doc is accepted by the reader
+    but not written back (TYPE is only emitted for custom-grammar documents).
+    """
+    input_markdown = """\
+# Document title
+
+## Requirement title
+
+**Type**: REQUIREMENT \\
+**UID**: REQ-1
+
+System shall do X.
+"""
+    expected_markdown = """\
+# Document title
+
+## Requirement title
+
+**UID**: REQ-1
+
+**Statement**: System shall do X.
+"""
+    document, _ = _assert_markdown_roundtrip(input_markdown, expected_markdown)
+
+    requirement = document.section_contents[0]
+    assert isinstance(requirement, SDocNode)
+    assert requirement.node_type == "REQUIREMENT"
+    assert requirement.reserved_uid == "REQ-1"
+
+
+def test_021_type_custom_grammar_preserves_node_type():
+    """Custom-grammar documents: TYPE is written for every non-SECTION/TEXT node."""
+    input_markdown = """\
+# Document title
+
+**Grammar**: `requirements.gra.md`
+
+## Some Assumption
+
+**Type**: ASSUMPTION \\
+**UID**: ASM-1
+
+Some assumption text.
+"""
+    # Grammar backticks are stripped by the reader and not re-added by the
+    # writer.  With an unresolved grammar (element is None) STATEMENT cannot be
+    # detected as multiline, so it is serialised as a single-line meta field.
+    expected_markdown = """\
+# Document title
+
+**Grammar**: requirements.gra.md
+
+## Some Assumption
+
+**Type**: ASSUMPTION \\
+**UID**: ASM-1 \\
+**Statement**: Some assumption text.
+"""
+    document, _ = _assert_markdown_roundtrip(input_markdown, expected_markdown)
+
+    node = document.section_contents[0]
+    assert isinstance(node, SDocNode)
+    assert node.node_type == "ASSUMPTION"
+    assert node.reserved_title == "Some Assumption"
+
+
+def test_022_type_section_emitted_in_custom_grammar():
+    """
+    With a custom grammar, the writer emits **Type**: SECTION for SECTION nodes.
+
+    Without the TYPE field the reader would treat any heading that has a meta
+    block (e.g. auto-generated MID) as a typed node and mis-classify it as a
+    REQUIREMENT on the next read cycle.
+    """
+    input_markdown = """\
+# Document title
+
+**Grammar**: `requirements.gra.md`
+
+## Test Section
+
+**Type**: SECTION
+
+### Some Assumption
+
+**Type**: ASSUMPTION \\
+**UID**: ASM-1
+
+Some assumption text.
+"""
+    expected_markdown = """\
+# Document title
+
+**Grammar**: requirements.gra.md
+
+## Test Section
+
+**Type**: SECTION
+
+### Some Assumption
+
+**Type**: ASSUMPTION \\
+**UID**: ASM-1 \\
+**Statement**: Some assumption text.
+"""
+    document, _ = _assert_markdown_roundtrip(input_markdown, expected_markdown)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert section.reserved_title == "Test Section"
+
+    assumption = section.section_contents[0]
+    assert isinstance(assumption, SDocNode)
+    assert assumption.node_type == "ASSUMPTION"
+    assert assumption.reserved_title == "Some Assumption"
+
+
+def test_023_type_section_mid_preserved():
+    """
+    SECTION MID from meta block is preserved as the section's reserved_mid
+    (MD-27). A leading **STATEMENT**: label in the TEXT child's body is a
+    human-authored mimic of the node's own field label and is stripped.
+    """
+    input_markdown = """\
+# Document title
+
+**Grammar**: `requirements.gra.md`
+
+## Introduction
+
+**Type**: SECTION \\
+**MID**: 11111111111111111111111111111111
+
+**STATEMENT**: This is a TEXT node statement, not a SECTION node statement.
+"""
+    expected_markdown = """\
+# Document title
+
+**Grammar**: requirements.gra.md
+
+## Introduction
+
+**Type**: SECTION \\
+**MID**: 11111111111111111111111111111111
+
+This is a TEXT node statement, not a SECTION node statement.
+"""
+    document, _ = _assert_markdown_roundtrip(input_markdown, expected_markdown)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert section.reserved_title == "Introduction"
+    assert str(section.reserved_mid) == "11111111111111111111111111111111"
+    assert section.mid_permanent is True
+
+    text_node = section.section_contents[0]
+    assert isinstance(text_node, SDocNode)
+    assert text_node.node_type == "TEXT"
+    statement_fields = text_node.ordered_fields_lookup.get("STATEMENT", [])
+    assert len(statement_fields) > 0
+    assert (
+        "This is a TEXT node statement" in statement_fields[0].get_text_value()
+    )
+
+
+def test_024_type_section_mid_with_text_mid_body():
+    r"""
+    SECTION MID is preserved; **Type**: TEXT \\ **MID**: ... prefix in the section
+    body is parsed as the TEXT node's machine identifier (MD-28). A leading
+    **STATEMENT**: label right after the prefix is a human-authored mimic of
+    the node's own field label and is stripped.
+
+    With an unresolved grammar the writer does not re-emit the TEXT TYPE/MID
+    header (no TEXT element in elements_by_type), so the output contains only
+    the TEXT statement.  The SECTION MID is still preserved.
+    """
+    input_markdown = """\
+# Document title
+
+**Grammar**: `requirements.gra.md`
+
+## Introduction
+
+**Type**: SECTION \\
+**MID**: 11111111111111111111111111111111
+
+**Type**: TEXT \\
+**MID**: 22222222222222222222222222222222
+
+**STATEMENT**: This is a text statement.
+"""
+    # With an unresolved grammar the writer cannot know that TEXT has a MID
+    # field, so it emits only the statement verbatim (without TYPE/MID header).
+    # The **STATEMENT**: label from the input is stripped.
+    expected_markdown = """\
+# Document title
+
+**Grammar**: requirements.gra.md
+
+## Introduction
+
+**Type**: SECTION \\
+**MID**: 11111111111111111111111111111111
+
+This is a text statement.
+"""
+    document, _ = _assert_markdown_roundtrip(input_markdown, expected_markdown)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert str(section.reserved_mid) == "11111111111111111111111111111111"
+    assert section.mid_permanent is True
+
+    text_node = section.section_contents[0]
+    assert isinstance(text_node, SDocNode)
+    assert text_node.node_type == "TEXT"
+    # The TEXT MID was parsed from the TYPE/MID prefix in the input body.
+    assert str(text_node.reserved_mid) == "22222222222222222222222222222222"
+    assert text_node.mid_permanent is True
+    statement_fields = text_node.ordered_fields_lookup.get("STATEMENT", [])
+    assert len(statement_fields) > 0
+    assert (
+        statement_fields[0].get_text_value().strip()
+        == "This is a text statement."
+    )
+
+
+def test_025_statement_body_with_fenced_code_block_containing_field_patterns():
+    """
+    A multiline STATEMENT whose body contains a fenced code block with
+    **KEY**: value lines must NOT have those lines interpreted as duplicate
+    field declarations.
+    """
+    input_markdown = """\
+# Document title
+
+## Requirement with code-block example
+
+**UID**: REQ-1
+
+**Statement**:
+
+The heading meta block uses the following syntax:
+
+```
+**Type**: SECTION \\
+**MID**: 11111111111111111111111111111111
+```
+
+A second example shows the TEXT prefix:
+
+```
+**Type**: TEXT \\
+**MID**: 22222222222222222222222222222222
+
+**Statement**: Body text here.
+```
+"""
+    reader = SDMarkdownReader()
+    # This currently raises StrictDocSemanticError due to duplicate field
+    # names found inside the fenced code blocks.
+    document = reader.read(input_markdown, file_path=None)
+
+    req = document.section_contents[0]
+    assert isinstance(req, SDocNode)
+    statement_fields = req.ordered_fields_lookup.get("STATEMENT", [])
+    assert len(statement_fields) == 1
+
+
+def test_026_document_level_prefix_roundtrips():
+    """Document-level PREFIX is preserved across read/write cycles."""
+    input_markdown = """\
+# Requirements specification
+
+**Prefix**: MYDOC-
+
+## Requirement
+
+**UID**: MYDOC-001
+
+**Statement**: System shall do B.
+"""
+    document, _ = _assert_markdown_roundtrip(input_markdown)
+    assert document.config.requirement_prefix == "MYDOC-"
+
+
+def test_027_section_prefix_without_type_roundtrips():
+    """Section-level PREFIX (no explicit TYPE) is preserved across read/write cycles."""
+    input_markdown = """\
+# Requirements specification
+
+## Chapter 2
+
+**Prefix**: LEVEL2-REQ-
+
+### Requirement
+
+**UID**: LEVEL2-REQ-001
+
+**Statement**: System shall do B.
+"""
+    document, output = _assert_markdown_roundtrip(input_markdown)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert section.get_prefix() == "LEVEL2-REQ-"
+    # No spurious TEXT child from the meta block.
+    assert not any(
+        n.node_type == "TEXT"
+        for n in section.section_contents
+        if isinstance(n, SDocNode)
+    )
+
+
+def test_029_document_config_roundtrip():
+    """
+    Document-level config data survives a full write-then-read cycle.
+    """
+    input_markdown = """\
+# Requirements specification
+
+**Version**: Git commit: @GIT_VERSION, Git branch: @GIT_BRANCH \\
+**Date**: @GIT_COMMIT_DATETIME \\
+**Classification**: Confidential
+"""
+    _, output_markdown = _assert_markdown_roundtrip(input_markdown)
+    document_from_output = SDMarkdownReader().read(
+        output_markdown, file_path=None
+    )
+    assert (
+        document_from_output.config.version
+        == "Git commit: @GIT_VERSION, Git branch: @GIT_BRANCH"
+    )
+    assert document_from_output.config.date == "@GIT_COMMIT_DATETIME"
+    assert document_from_output.config.classification == "Confidential"
+
+
+def test_030_document_level_metadata_roundtrip():
+    """
+    User-defined custom metadata survives a full write-then-read cycle.
+    """
+    input_markdown = """\
+# Requirements specification
+
+**Author**: Jane \\
+**Checked-by**: Chuck Norris
+"""
+    _, output_markdown = _assert_markdown_roundtrip(input_markdown)
+
+    document_from_output = SDMarkdownReader().read(
+        output_markdown, file_path=None
+    )
+    assert document_from_output.config.get_custom_metadata() == [
+        ("Author", "Jane"),
+        ("Checked-by", "Chuck Norris"),
+    ]
+
+
+def test_028_section_prefix_with_type_drops_type_on_output():
+    """
+    Section-level PREFIX written with explicit TYPE: SECTION is accepted;
+    the writer drops TYPE on output for default-grammar documents (matches
+    the existing TYPE: SECTION normalisation behaviour).
+    """
+    input_markdown = """\
+# Requirements specification
+
+## Chapter 2
+
+**Type**: SECTION \\
+**Prefix**: LEVEL2-REQ-
+
+### Requirement
+
+**UID**: LEVEL2-REQ-001
+
+**Statement**: System shall do B.
+"""
+    expected_markdown = """\
+# Requirements specification
+
+## Chapter 2
+
+**Prefix**: LEVEL2-REQ-
+
+### Requirement
+
+**UID**: LEVEL2-REQ-001
+
+**Statement**: System shall do B.
+"""
+    document, _ = _assert_markdown_roundtrip(input_markdown, expected_markdown)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert section.get_prefix() == "LEVEL2-REQ-"
+
+
+def test_031_roundtrip_headings_deeper_than_h6():
+    input_sdoc = """\
+[DOCUMENT]
+TITLE: Document title
+
+[[SECTION]]
+TITLE: Level 1
+
+[[SECTION]]
+TITLE: Level 2
+
+[[SECTION]]
+TITLE: Level 3
+
+[[SECTION]]
+TITLE: Level 4
+
+[[SECTION]]
+TITLE: Level 5
+
+[[SECTION]]
+TITLE: Level 6
+
+[REQUIREMENT]
+UID: REQ-DEEP-1
+TITLE: Deep requirement
+STATEMENT: Statement nested seven levels below the document.
+
+[[/SECTION]]
+
+[[/SECTION]]
+
+[[/SECTION]]
+
+[[/SECTION]]
+
+[[/SECTION]]
+
+[[/SECTION]]
+"""
+    expected_markdown = """\
+# Document title
+
+## Level 1
+
+### Level 2
+
+#### Level 3
+
+##### Level 4
+
+###### Level 5
+
+####### Level 6
+
+######## Deep requirement
+
+**UID**: REQ-DEEP-1
+
+**Statement**: Statement nested seven levels below the document.
+"""
+    _assert_sdoc_to_markdown_roundtrip(input_sdoc, expected_markdown)
+
+
+def test_032_root_level_type_text_mid_body_is_parsed_as_text_node():
+    r"""
+    A **Type**: TEXT \\ **MID**: ... prefix directly under the H1 (before any
+    subsection) is parsed as the document's root-level TEXT node's machine
+    identifier, mirroring the section-level MD-28 convention (test_024). A
+    **Statement**: label right after the prefix is a human-authored mimic of
+    the node's own field label and must not become part of the parsed
+    STATEMENT field value.
+    """
+    input_markdown = """\
+# Sample document
+
+**Grammar**: `sample.gra.md`
+
+**Type**: TEXT \\
+**MID**: 11111111111111111111111111111111
+
+**STATEMENT**: This is a sample root-level text statement.
+
+## Example section
+"""
+    # With an unresolved grammar the writer cannot know that TEXT has a MID
+    # field, so it emits only the statement verbatim (without TYPE/MID header),
+    # matching the section-level behavior in test_024. The **STATEMENT**:
+    # label from the input is stripped since it is not part of the actual
+    # statement text.
+    expected_markdown = """\
+# Sample document
+
+**Grammar**: sample.gra.md
+
+This is a sample root-level text statement.
+
+## Example section
+
+**Type**: SECTION
+"""
+    document, _ = _assert_markdown_roundtrip(input_markdown, expected_markdown)
+
+    text_node = document.section_contents[0]
+    assert isinstance(text_node, SDocNode)
+    assert text_node.node_type == "TEXT"
+    # The TEXT MID was parsed from the TYPE/MID prefix in the root body.
+    assert str(text_node.reserved_mid) == "11111111111111111111111111111111"
+    assert text_node.mid_permanent is True
+    statement_fields = text_node.ordered_fields_lookup.get("STATEMENT", [])
+    assert len(statement_fields) > 0
+    assert (
+        statement_fields[0].get_text_value().strip()
+        == "This is a sample root-level text statement."
+    )
+
+    section = document.section_contents[1]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert section.reserved_title == "Example section"

@@ -9,6 +9,13 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 
 from textx import TextXSyntaxError
 
+from strictdoc.backend.markdown.markdown_to_html_fragment_writer import (
+    MarkdownToHtmlFragmentWriter,
+)
+from strictdoc.backend.rst.rst_to_html_fragment_writer import (
+    RstToHtmlFragmentWriter,
+)
+from strictdoc.backend.sdoc.constants import SDocMarkup
 from strictdoc.backend.sdoc.document_reference import DocumentReference
 from strictdoc.backend.sdoc.error_handling import get_textx_syntax_error_message
 from strictdoc.backend.sdoc.free_text_reader import SDFreeTextReader
@@ -17,7 +24,11 @@ from strictdoc.backend.sdoc.models.document import SDocDocument
 from strictdoc.backend.sdoc.models.free_text import FreeTextContainer
 from strictdoc.backend.sdoc.models.grammar_element import GrammarElement
 from strictdoc.backend.sdoc.models.inline_link import InlineLink
-from strictdoc.backend.sdoc.models.model import SDocDocumentIF, SDocNodeIF
+from strictdoc.backend.sdoc.models.model import (
+    RequirementFieldName,
+    SDocDocumentIF,
+    SDocNodeIF,
+)
 from strictdoc.backend.sdoc.models.node import SDocNode, SDocNodeField
 from strictdoc.backend.sdoc.models.object_factory import SDocObjectFactory
 from strictdoc.backend.sdoc.models.reference import (
@@ -38,9 +49,6 @@ from strictdoc.export.html.form_objects.requirement_form_object import (
     RequirementFormField,
     RequirementFormFieldType,
     RequirementFormObject,
-)
-from strictdoc.export.rst.rst_to_html_fragment_writer import (
-    RstToHtmlFragmentWriter,
 )
 from strictdoc.helpers.cast import assert_cast
 from strictdoc.helpers.file_modification_time import set_file_modification_time
@@ -86,13 +94,11 @@ class CreateOrUpdateNodeCommand:
         *,
         form_object: RequirementFormObject,
         node_info: Union[CreateNodeInfo, UpdateNodeInfo],
-        context_document: SDocDocument,
         traceability_index: TraceabilityIndex,
         project_config: ProjectConfig,
     ) -> None:
         self.form_object: RequirementFormObject = form_object
         self.node_info: Union[CreateNodeInfo, UpdateNodeInfo] = node_info
-        self.context_document: SDocDocument = context_document
         self.traceability_index: TraceabilityIndex = traceability_index
         self.project_config: ProjectConfig = project_config
 
@@ -106,6 +112,18 @@ class CreateOrUpdateNodeCommand:
 
         traceability_index: TraceabilityIndex = self.traceability_index
 
+        if node_to_update_or_none is not None:
+            node_document = assert_cast(
+                node_to_update_or_none.get_document(), SDocDocument
+            )
+        else:
+            node_document = assert_cast(
+                traceability_index.get_node_by_mid(
+                    MID(form_object.document_mid)
+                ),
+                SDocDocument,
+            )
+
         map_form_to_requirement_fields: Dict[
             RequirementFormField, Optional[FreeTextContainer]
         ] = {}
@@ -115,16 +133,32 @@ class CreateOrUpdateNodeCommand:
             for field_ in field_bucket_:
                 if field_.field_type != RequirementFormFieldType.MULTILINE:
                     continue
-                (
-                    parsed_html,
-                    rst_error,
-                ) = RstToHtmlFragmentWriter(
-                    project_config=self.project_config,
-                    context_document=self.context_document,
-                ).write_with_validation(field_.field_value)
+                # Validate the field content using the writer that matches the
+                # document's markup (RST by default, Markdown for Markdown
+                # documents).
+                markup = (
+                    node_document.config.markup
+                    if node_document is not None
+                    else None
+                )
+                if markup == SDocMarkup.MARKDOWN:
+                    (
+                        parsed_html,
+                        markup_error,
+                    ) = MarkdownToHtmlFragmentWriter.write_with_validation(
+                        field_.field_value
+                    )
+                else:
+                    (
+                        parsed_html,
+                        markup_error,
+                    ) = RstToHtmlFragmentWriter(
+                        project_config=self.project_config,
+                        context_document=node_document,
+                    ).write_with_validation(field_.field_value)
                 if parsed_html is None:
-                    assert rst_error is not None
-                    form_object.add_error(field_.field_name, rst_error)
+                    assert markup_error is not None
+                    form_object.add_error(field_.field_name, markup_error)
                 else:
                     try:
                         free_text_container: Optional[FreeTextContainer] = (
@@ -187,11 +221,13 @@ class CreateOrUpdateNodeCommand:
         document: SDocDocument
         existing_uid: Optional[str]
         existing_node_fields: List[SDocNodeField] = []
+        old_title_is_none: bool = False
         if isinstance(self.node_info, UpdateNodeInfo):
             requirement = self.node_info.node_to_update
             document = assert_cast(requirement.get_document(), SDocDocument)
 
             existing_uid = requirement.reserved_uid
+            old_title_is_none = requirement.reserved_title is None
 
             existing_node_fields = list(requirement.enumerate_fields())
 
@@ -278,13 +314,15 @@ class CreateOrUpdateNodeCommand:
                 parent=parent, node_type=form_object.element_type
             )
             requirement.reserved_mid = MID(form_object.requirement_mid)
-            if document.config.enable_mid:
-                requirement.mid_permanent = True
-
             assert document.grammar is not None
             grammar_element: GrammarElement = document.grammar.elements_by_type[
                 form_object.element_type
             ]
+            if (
+                document.config.enable_mid
+                or "MID" in grammar_element.fields_map
+            ):
+                requirement.mid_permanent = True
 
             requirement.is_composite = (
                 grammar_element.property_is_composite is True
@@ -301,6 +339,22 @@ class CreateOrUpdateNodeCommand:
                 requirement, form_object, map_form_to_requirement_fields
             )
             traceability_index.create_requirement(requirement=requirement)
+
+        # Recalculate ng_resolved_custom_level based on new title state.
+        # This mirrors the logic in processor.py which sets it during parsing.
+        # When a title is added/removed via the form, the value must be updated
+        # to keep level numbering consistent.
+        if (
+            RequirementFieldName.LEVEL not in requirement.ordered_fields_lookup
+            and document.config.auto_levels
+        ):
+            if (
+                requirement.reserved_title is None
+                or not document.config.is_requirement_in_toc()
+            ):
+                requirement.ng_resolved_custom_level = "None"
+            else:
+                requirement.ng_resolved_custom_level = None
 
         action_object = UpdateRequirementActionObject()
         action_object.existing_references_uids.update(
@@ -437,10 +491,28 @@ class CreateOrUpdateNodeCommand:
 
         traceability_index.update_last_updated()
 
+        new_title_is_none = requirement.reserved_title is None
+
+        # When a node's title presence changes (added or removed), the TOC
+        # level numbers of all sibling nodes shift. Every node in the document
+        # must be re-rendered so the browser sees the correct numbers.
+        # Nodes whose title presence did not change do not trigger this: only
+        # the edited node (already in the set) needs re-rendering.
+        if old_title_is_none != new_title_is_none:
+            nodes_stack = list(document.section_contents)
+            while nodes_stack:
+                node_ = nodes_stack.pop()
+                if isinstance(node_, SDocNode):
+                    action_object.this_document_requirements_to_update.add(
+                        node_
+                    )
+                    if node_.section_contents is not None:
+                        nodes_stack.extend(node_.section_contents)
+
         return CreateOrUpdateNodeResult(
             this_document_requirements_to_update=list(
                 action_object.this_document_requirements_to_update
-            )
+            ),
         )
 
     def _update_traceability_index_with_links_and_anchors(
@@ -496,14 +568,12 @@ class CreateOrUpdateNodeCommand:
                     map_form_to_requirement_fields[form_field]
                 )
                 requirement_field: Optional[SDocNodeField] = (
-                    SDocNodeField(
+                    SDocNodeField.from_parts(
                         node,
                         field_name=form_field_name,
                         parts=free_text_content.parts,
-                        multiline__="true"
-                        if form_field.field_type
-                        == RequirementFormFieldType.MULTILINE
-                        else None,
+                        multiline=form_field.field_type
+                        == RequirementFormFieldType.MULTILINE,
                     )
                     if free_text_content is not None
                     else None
@@ -513,11 +583,3 @@ class CreateOrUpdateNodeCommand:
                     form_field_index=form_field_index,
                     value=requirement_field,
                 )
-                if (
-                    requirement_field is not None
-                    and free_text_content is not None
-                ):
-                    for part_ in requirement_field.parts:
-                        if isinstance(part_, str):
-                            continue
-                        part_.parent = requirement_field

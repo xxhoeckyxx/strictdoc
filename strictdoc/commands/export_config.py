@@ -11,6 +11,7 @@ class ExportCommandConfig:
         self,
         *,
         debug: bool,
+        development: bool = False,
         command: str,
         input_paths: List[str],
         output_dir: Optional[str],
@@ -30,9 +31,12 @@ class ExportCommandConfig:
         generate_diff_git: Optional[str],
         generate_diff_dirs: Optional[Tuple[str, str]],
         chromedriver: Optional[str],
+        chrome_binary: Optional[str],
+        disable_ssl_check: bool,
     ):
         assert isinstance(input_paths, list), f"{input_paths}"
         self.debug: bool = debug
+        self.development: bool = development
         self.command: str = command
         self.input_paths: List[str] = input_paths
         self.output_dir: Optional[str] = output_dir
@@ -52,6 +56,8 @@ class ExportCommandConfig:
         self.generate_diff_git: Optional[str] = generate_diff_git
         self.generate_diff_dirs: Optional[Tuple[str, str]] = generate_diff_dirs
         self.chromedriver: Optional[str] = chromedriver
+        self.chrome_binary: Optional[str] = chrome_binary
+        self.disable_ssl_check: bool = disable_ssl_check
 
     def get_path_to_config(self) -> str:
         # FIXME: The control flow can be improved.

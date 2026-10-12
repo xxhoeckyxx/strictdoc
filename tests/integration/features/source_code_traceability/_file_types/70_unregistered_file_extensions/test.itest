@@ -3,7 +3,7 @@
 #
 
 RUN: %strictdoc export %S --output-dir %T | filecheck %s
-CHECK: Published: Hello world doc
+CHECK: Export completed.
 
 RUN: %check_exists --file "%T/html/_source_files/file.unknown_extension.html"
 
@@ -26,4 +26,4 @@ CHECK-SOURCE-FILE: file.unknown_extension, range
 
 RUN: %cat %T/html/source_coverage.html | filecheck %s --check-prefix CHECK-SOURCE-COVERAGE
 CHECK-SOURCE-COVERAGE: file.unknown_extension
-CHECK-SOURCE-COVERAGE: strictdoc.toml
+CHECK-SOURCE-COVERAGE: strictdoc_config.py

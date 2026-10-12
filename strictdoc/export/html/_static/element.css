@@ -9,6 +9,13 @@ svg {
   flex-shrink: 0;
 }
 
+/* .plantuml and other SVG text elements: */
+svg text,
+/* mermaid text labels: */
+svg[id*="mermaid"] span {
+  cursor: text;
+}
+
 /* typography */
 
 h1 { font-size: 2em; }
@@ -112,6 +119,7 @@ a.action_button:visited {
   padding-left: calc(var(--base-rhythm)*1.5);
   padding-right: calc(var(--base-rhythm)*1.5);
   min-height: calc(var(--base-rhythm)*4);
+  height: min-content; /* to prevent it from stretching inside the flex container */
   max-width: 100%;
 
   /* box-shadow: rgb(0 0 0 / 10%) 0px 1px 2px 0px; */
@@ -137,6 +145,27 @@ a.action_button:hover {
   color: var(--color-action);
   opacity: .4;
   cursor: default;
+}
+
+.action_button.pending,
+.action_button.pending:hover {
+  pointer-events: none;
+  opacity: .6;
+  cursor: default;
+}
+
+.ico_submit_static { display: block; }
+.ico_submit_spinner { display: none; }
+
+.action_button.pending .ico_submit_static { display: none; }
+.action_button.pending .ico_submit_spinner {
+  display: block;
+  animation: ico-spin 0.7s linear infinite;
+  transform-origin: center;
+}
+
+@keyframes ico-spin {
+  to { transform: rotate(360deg); }
 }
 
 .action_button svg {
@@ -221,7 +250,7 @@ a.action_icon:hover {
   column-gap: 0;
   padding-left: calc(var(--base-rhythm)* 0.75);
   padding-right: calc(var(--base-rhythm)* 0.75);
-  min-height: calc(var(--base-rhythm)*3);
+  min-height: calc(var(--base-rhythm)* 2.75);
 }
 
 .action_button.compact .action_button_compact__arising {
@@ -261,6 +290,20 @@ sdoc-node-controls .action_button {
   border-radius: 20% !important;
 
   vertical-align: top;
+}
+
+.action_button--disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  filter: grayscale(100%);
+  pointer-events: none;
+}
+
+/*  We re-enable pointer-events on hover,
+ *  so the tooltip (title attribute) shows up.
+ */
+.action_button--disabled:hover {
+    pointer-events: auto;
 }
 
 /* field_action */
@@ -348,6 +391,12 @@ sdoc-field {
 sdoc-field-content {
   flex-grow: 1;
   width: 100%; /* holds within the width of the parent */
+}
+
+sdoc-node-field sdoc-field-content {
+  /* For `sdoc-node` context only. Not for `sdoc-meta`
+     or another parent that has fit-content */
+  container-type: inline-size;
 }
 
 .copy_to_clipboard-cover {
@@ -439,6 +488,11 @@ sdoc-anchor {
 }
 
 sdoc-node > sdoc-anchor {
+  /*
+    A direct descendant is an anchor to the node itself.
+    This is to distinguish it from anchors within the nodes' text fields.
+  */
+
   scroll-snap-margin-top: unset; /** top: 0; */
   scroll-margin-top:      unset; /** top: 0; */
 
@@ -446,7 +500,7 @@ sdoc-node > sdoc-anchor {
   position: absolute;
   top: 0;
   bottom: 0;
-  z-index: 0;
+  z-index: 2;
 }
 
 sdoc-anchor.anchor_in_rst {
@@ -460,8 +514,7 @@ sdoc-anchor.anchor_in_rst {
 }
 
 sdoc-anchor:target + sdoc-node-content sdoc-node-title,
-sdoc-anchor:target + sdoc-section sdoc-section-title,
-sdoc-anchor:target + .requirement__title {
+sdoc-anchor:target + sdoc-section sdoc-section-title {
   background-color: var(--color-highlight);
 }
 
@@ -471,10 +524,11 @@ sdoc-anchor .anchor_block {
 
 /*
   This styles should only be triggered if
-  export/html/_static/controllers/anchor_controller.js
-  processes the parent sdoc-node.
+  export/html/_static/controllers/copy_clipboard_controller.js
+  processes anchors in the parent sdoc-node.
 */
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor {
+
+sdoc-node[show-anchors] sdoc-anchor {
   position: absolute;
   z-index: 2;
   left: 0;
@@ -482,19 +536,19 @@ sdoc-node[data-controller="anchor_controller"] sdoc-anchor {
   opacity: 0;
 }
 
-sdoc-node[data-controller="anchor_controller"]:hover sdoc-anchor {
+sdoc-node[show-anchors]:hover sdoc-anchor {
   opacity: 1;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor.anchor_has_back_links {
+sdoc-node[show-anchors] sdoc-anchor.anchor_has_back_links {
   opacity: 1;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor:hover {
+sdoc-node[show-anchors] sdoc-anchor:hover {
   z-index: 10;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_block {
+sdoc-node[show-anchors] sdoc-anchor .anchor_block {
   display: block;
   position: absolute;
   top: 0;
@@ -505,14 +559,14 @@ sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_block {
   opacity: .6;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor:hover .anchor_block {
+sdoc-node[show-anchors] sdoc-anchor:hover .anchor_block {
   background-color: rgb(255, 255, 255);
   border-color: rgba(0, 0, 0, 0.05);
   box-shadow: rgb(0 0 0 / 10%) 0px 2px var(--base-rhythm) 0px;
   opacity: 1;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_button {
+sdoc-node[show-anchors] sdoc-anchor .anchor_button {
   cursor: pointer;
   font-size:var(--font-size-sm);
   font-weight: 600;
@@ -540,43 +594,41 @@ sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_button {
   overflow: hidden;
 
   transition: opacity 0.2s;
-  opacity: .6;
+  /* opacity: .6; */
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_button:hover {
+sdoc-node[show-anchors] sdoc-anchor .anchor_button:hover {
   color: var(--color-hover);
   z-index: 6;
-
-  opacity: 1;
+  /* opacity: 1; */
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_button svg {
-  color: var(--color-fg-secondary);
+sdoc-node[show-anchors] sdoc-anchor .anchor_button svg {
+  /* color: var(--color-fg-secondary); */
   margin-left: calc(var(--base-rhythm)*(-.5));
   margin-right: calc(var(--base-rhythm)*(-.5));
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor.anchor_has_back_links .anchor_button svg {
-  color: black;
+sdoc-node[show-anchors] sdoc-anchor.anchor_has_back_links .anchor_button svg {
   opacity: 1;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_button:hover svg {
+sdoc-node[show-anchors] sdoc-anchor .anchor_button:hover svg {
   color: var(--color-action) !important;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_button_text {
+sdoc-node[show-anchors] sdoc-anchor .anchor_button_text {
   font-size: var(--font-size-sm);
   font-weight: bolder;
 
   display: none;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor:hover .anchor_button_text {
+sdoc-node[show-anchors] sdoc-anchor:hover .anchor_button_text {
   display: block;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_back_links {
+sdoc-node[show-anchors] sdoc-anchor .anchor_back_links {
   min-width: 300px;
   padding-left: calc(var(--base-rhythm)*4);
   padding-right: var(--base-rhythm);
@@ -586,19 +638,19 @@ sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_back_links {
   display: none;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor:hover .anchor_back_links {
+sdoc-node[show-anchors] sdoc-anchor:hover .anchor_back_links {
   display: block;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_back_links a {
+sdoc-node[show-anchors] sdoc-anchor .anchor_back_links a {
   display: list-item;
 }
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_back_links a::marker {
+sdoc-node[show-anchors] sdoc-anchor .anchor_back_links a::marker {
   content: '⇠  ';
   width: calc(var(--base-rhythm)*4);
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_back_links_number {
+sdoc-node[show-anchors] sdoc-anchor .anchor_back_links_number {
   color: var(--color-fg-accent);
   position: absolute;
   width: calc(var(--base-rhythm)*4);
@@ -608,7 +660,7 @@ sdoc-node[data-controller="anchor_controller"] sdoc-anchor .anchor_back_links_nu
   font-weight: bold;
 }
 
-sdoc-node[data-controller="anchor_controller"] sdoc-anchor:hover .anchor_back_links_number {
+sdoc-node[show-anchors] sdoc-anchor:hover .anchor_back_links_number {
   top: calc(var(--base-rhythm)*5);
 }
 
@@ -679,7 +731,8 @@ sdoc-node[data-controller="anchor_controller"] sdoc-anchor:hover .anchor_back_li
 [data-viewtype="diff"] [data-link="diff"],
 [data-viewtype="requirements-coverage"] [data-link="requirements_coverage"],
 [data-viewtype="traceability-matrix"] [data-link="traceability-matrix"],
-[data-viewtype="coverage-tree"] [data-link="source_coverage"] {
+[data-viewtype="coverage-tree"] [data-link="source_coverage"],
+[data-viewtype="tree-map"] [data-link="tree-map"] {
   color: var(--color-bg-contrast);
   border-color: var(--color-bg-contrast);
   cursor: default;
@@ -849,7 +902,10 @@ svg.svg_icon {
   height: calc(var(--base-rhythm)*2);
   flex: 0 0 auto;
   background: transparent;
-  /* color: rgb(246, 153, 13); */
+  /* Reset the values specified for 'sdoc-autogen svg': */
+  max-width: unset;
+  padding: unset;
+  vertical-align: middle;
 }
 
 .svg_icon_hover_visible {
@@ -933,6 +989,12 @@ svg:hover .svg_icon_not_hover_visible {
   background-color: var(--color-bg-ui);
   color: var(--color-fg-secondary-invert);
   font-size: .85rem;
+}
+
+.strictdoc__link {
+  display: flex;
+  align-items: center;
+  column-gap: calc(var(--base-rhythm)/2);
 }
 
 a.strictdoc__link {
@@ -1041,6 +1103,12 @@ a.strictdoc__version:hover {
   cursor: default;
 }
 
+.dropdown_menu_item.empty {
+  color: var(--color-fg-secondary);
+  background-color: var(--color-bg-contrast);
+  cursor: default;
+}
+
 /*
  ** header-actions: reusable wrapper for header buttons + kebab dropdown
  */
@@ -1112,6 +1180,13 @@ sdoc-menu menu {
   flex-direction: column;
   row-gap: calc(var(--base-rhythm)/2);
 
+}
+
+/* Set by dropdown_menu.js when the menu would otherwise overflow past the
+   bottom of the scroll area - opens upward instead of downward. */
+sdoc-menu menu.is-flipped {
+  top: auto;
+  bottom: 0;
 }
 
 sdoc-menu.add_node menu {
@@ -1294,6 +1369,11 @@ a.tree_item,
   font-size: var(--font-size-sm);
   font-weight: 700;
   width: 99%; /* To calculate cite overflow  */
+  /* Flex items default to min-width: auto, which floors width at the
+    content's intrinsic size and makes width: 99% overflow the parent on
+    narrow viewports (flexbox min-width:auto pitfall). */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .document_title[data-file_name]::after {
@@ -1304,6 +1384,7 @@ a.tree_item,
   width: 99%; /* To calculate cite overflow  */
   font-weight:400;
   opacity:0.6;
+  overflow-wrap: normal;
 }
 
 /** TOC **/
@@ -1340,6 +1421,16 @@ a.tree_item,
   padding-top: var(--base-rhythm);
   padding-bottom: var(--base-rhythm);
   padding-right: var(--base-rhythm);
+  /* to wrap a long token */
+  overflow-wrap: anywhere;
+}
+
+.toc-section-number {
+  margin-right: .5rem;
+  font-size: 0.85em;
+  font-weight: bold;
+  /* to keep on the first line when wrapping a long token */
+  float: left;
 }
 
 .toc a,
@@ -1549,6 +1640,23 @@ a.sdoc-table_key_value-key::after {
   font-size: var(--font-size-xxsm);
   font-weight: 600;
   text-transform: uppercase;
+}
+
+kbd {
+  display: inline-flex;
+  vertical-align: baseline;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 1px solid;
+  font-size: .75em;
+  border-radius: .25em;
+  margin: 0 .25em;
+  padding: .25em .25em calc(.25em - 1px) .25em;
+  line-height: 1;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-family: monospace;
 }
 
 .error {
@@ -1939,4 +2047,104 @@ sdoc-node-content .field_issue-ribbon::before {
 
 .static_search-result-node-link a:hover {
   color: var(--color-hover);
+}
+
+/* checkbox with icon (template: #template-icon-checkbox) */
+
+.icon-checkbox { /* label element */
+  --gap: calc(var(--base-rhythm) * 0.5);
+  /* to stretch the label text to the full width, use the parent's properties */
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap);
+  cursor: pointer;
+  user-select: none;
+  padding: var(--gap);
+  border-radius: var(--gap);
+}
+
+.icon-checkbox:hover {
+  background-color: var(--color-bg-secondary);
+  color: var(--color-fg-accent);
+}
+
+.icon-checkbox input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.icon-checkbox .svg_icon__closed {
+  display: none;
+}
+
+.icon-checkbox input[type="checkbox"]:not(:checked) ~ svg .svg_icon__opened {
+  display: none;
+}
+
+.icon-checkbox input[type="checkbox"]:not(:checked) ~ svg .svg_icon__closed {
+  display: initial;
+}
+
+.icon-checkbox input[type="checkbox"]:not(:checked) ~ * {
+  color: var(--color-fg-secondary);
+}
+
+/* toggle switch (template: #template-switch) */
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--base-rhythm);
+  color: var(--color-fg-main);
+  font-size: var(--font-size-sm);
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.switch__slider {
+  position: relative;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--color-border);
+  transition: background-color 100ms ease-out;
+}
+
+.switch__slider::before {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-bg-main);
+  content: "";
+  transition: transform 100ms ease-out;
+}
+
+.switch__input:checked + .switch__slider {
+  background: var(--color-action);
+}
+
+.switch__input:checked + .switch__slider::before {
+  transform: translateX(12px);
+}
+
+.switch__input:focus-visible + .switch__slider {
+  outline: 2px solid var(--color-action);
+  outline-offset: 2px;
 }

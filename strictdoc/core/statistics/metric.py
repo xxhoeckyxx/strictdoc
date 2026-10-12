@@ -1,19 +1,13 @@
-"""
-@relation(SDOC-SRS-97, scope=file)
-"""
+from strictdoc.features.project_statistics.metric import Metric, MetricSection
+from strictdoc.helpers.deprecation_engine import DEPRECATION_ENGINE
 
-from dataclasses import dataclass
-from typing import List, Optional
+DEPRECATION_ENGINE.add_message(
+    "strictdoc.core.statistics.metric",
+    (
+        "WARNING: Importing project statistics metrics from "
+        "'strictdoc.core.statistics.metric' is deprecated. Use "
+        "'strictdoc.features.project_statistics.metric' instead."
+    ),
+)
 
-
-@dataclass
-class Metric:
-    name: str
-    value: str
-    link: Optional[str] = None
-
-
-@dataclass
-class MetricSection:
-    name: str
-    metrics: List[Metric]
+__all__ = ("Metric", "MetricSection")

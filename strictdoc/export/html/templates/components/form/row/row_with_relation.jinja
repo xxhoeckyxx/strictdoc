@@ -12,7 +12,6 @@
 {%- extends "components/form/row/index.jinja" %}
 
 {% block row_form_attributes %}
-  data-controller="deletable_field"
   data-testid="requirement-form-relation-row"
   mid="{{ relation_row_context.field.field_mid }}"
 {% endblock row_form_attributes %}
@@ -22,6 +21,15 @@
 {% endblock row_left %}
 
 {% block row_content scoped %}
+
+{# Hidden field: tells the server whether this relation row is newly added (true)
+   or was already saved in the document (false).
+   New rows with a blank UID are silently discarded on save; existing rows with a
+   blank UID trigger a "Relation UID must not be empty" validation error. #}
+<input type="hidden"
+  name="{{ relation_row_context.field.get_is_new_field_name() }}"
+  value="{{ 'true' if relation_row_context.field.is_new else 'false' }}"
+/>
 
 <sdoc-form-field-group
   data-field-label="Node relation"
@@ -38,11 +46,10 @@
     {%- endfor -%}
   {%- endif -%}
 
-  {# FIXME: #}
   {% if relation_row_context.field.field_type == "File" %}
-    <div style="color: orange; margin-top: calc(var(--base-rhythm) * (-3)); font-size: 0.75em;">
-      <b>Warning: Editing file relations is not supported yet.</b>
-    </div>
+    <sdoc-form-error>
+      Warning: Editing file relations is not supported yet.
+    </sdoc-form-error>
   {% endif %}
 
   {%- with

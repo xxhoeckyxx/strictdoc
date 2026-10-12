@@ -1,5 +1,5 @@
-RUN: %strictdoc export %S --output-dir %T/ | filecheck %s --dump-input=fail --check-prefix CHECK-EXPORT
-CHECK-EXPORT: Published: <b>"escaping"&nbsp;'document title'</b>
+RUN: %strictdoc --debug export %S --output-dir %T/ | filecheck %s --dump-input=fail --check-prefix CHECK-EXPORT
+CHECK-EXPORT: Export to HTML: <b>"escaping"&nbsp;'document title'</b>
 
 RUN: %cat %T/html/index.html | filecheck %s --dump-input=fail --check-prefix CHECK-INDEX
 RUN: %cat %T/html/traceability_matrix.html | filecheck %s --dump-input=fail --check-prefix CHECK-TRACEABILITY-MATRIX
@@ -30,7 +30,7 @@ CHECK-ALL-NEXT: data-file_name="input.sdoc"
 CHECK-ALL-NEXT: >&lt;b&gt;&#34;escaping&#34;&amp;nbsp;&#39;document title&#39;&lt;/b&gt;</div>
 
 # Right-hand bar: Document TOC.
-CHECK-ALL: <span class="section-number">
+CHECK-ALL: <span class="toc-section-number">
 CHECK-ALL-NEXT: {{[0-9]+}}
 CHECK-ALL-NEXT: </span>&lt;b&gt;&#34;escaping&#34;&amp;nbsp;&#39;section title&#39;&lt;/b&gt;
 
@@ -45,7 +45,7 @@ CHECK-INPUT: <h1 data-testid="document-title">
 CHECK-INPUT-NEXT:&lt;b&gt;&#34;escaping&#34;&amp;nbsp;&#39;document title&#39;&lt;/b&gt;
 
 CHECK-TABLE: <h1 data-testid="document-title">
-CHECK-TABLE-NEXT: &lt;b&gt;&#34;escaping&#34;&amp;nbsp;&#39;document title&#39;&lt;/b&gt;
+CHECK-TABLE: &lt;b&gt;&#34;escaping&#34;&amp;nbsp;&#39;document title&#39;&lt;/b&gt;
 
 # Main document: Section.
 CHECK-INPUT: <sdoc-autogen>1.&nbsp;&lt;b&gt;&#34;escaping&#34;&amp;nbsp;&#39;section title&#39;&lt;/b&gt;</sdoc-autogen>

@@ -15,8 +15,11 @@ from typing import (
     Union,
 )
 
+from strictdoc.backend.gcov.helpers import convert_function_name_to_gcovr_style
 from strictdoc.backend.sdoc.document_reference import DocumentReference
 from strictdoc.backend.sdoc.error_handling import StrictDocSemanticError
+from strictdoc.backend.sdoc.free_text_reader import SDFreeTextReader
+from strictdoc.backend.sdoc.models.anchor import Anchor
 from strictdoc.backend.sdoc.models.document_grammar import (
     DocumentGrammar,
 )
@@ -41,10 +44,13 @@ from strictdoc.backend.sdoc_source_code.models.source_file_info import (
     SourceFileTraceabilityInfo,
 )
 from strictdoc.backend.sdoc_source_code.models.source_node import SourceNode
-from strictdoc.core.constants import GraphLinkType
+from strictdoc.core.constants import GraphEdgeLabel, GraphLinkType
 from strictdoc.core.document_iterator import SDocDocumentIterator
 from strictdoc.core.file_system.source_tree import SourceFile
 from strictdoc.core.project_config import ProjectConfig, SourceNodesEntry
+from strictdoc.helpers.cargo_nextest import (
+    convert_nextest_test_to_rust_canonical_paths,
+)
 from strictdoc.helpers.cast import assert_cast
 from strictdoc.helpers.exception import StrictDocException
 from strictdoc.helpers.google_test import convert_function_name_to_gtest_macro
@@ -237,6 +243,154 @@ class FileTraceabilityIndex:
                     ).append(function_)
 
         #
+        # STEP: Auto-generated SDocNodes from source file comments and register
+        #       their UIDs. This must happen before marker validation so that
+        #       source files can reference these UIDs via @relation.
+        #
+        documents_with_generated_content = set()
+
+        section_cache: Dict[str, Union[SDocDocumentIF, SDocNode]] = {}
+        source_nodes_config: List[SourceNodesEntry] = (
+            project_config.source_nodes
+        )
+        unused_source_node_paths = {
+            config_entry_.path for config_entry_ in source_nodes_config
+        }
+        for (
+            path_to_source_file_,
+            traceability_info_,
+        ) in self.map_paths_to_source_file_traceability_info.items():
+            if len(traceability_info_.source_nodes) == 0:
+                continue
+
+            if len(source_nodes_config) == 0:
+                continue
+
+            relevant_source_node_entry = (
+                project_config.get_relevant_source_nodes_entry(
+                    path_to_source_file_
+                )
+            )
+            if relevant_source_node_entry is not None:
+                unused_source_node_paths.discard(
+                    relevant_source_node_entry.path
+                )
+            else:
+                continue
+
+            document_uid = relevant_source_node_entry.uid
+            document = traceability_index.get_node_by_uid(document_uid)
+            documents_with_generated_content.add(document)
+            current_top_node = None
+
+            for source_node_ in traceability_info_.source_nodes:
+                if len(source_node_.fields) == 0:
+                    continue
+
+                assert source_node_.entity_name is not None
+                sdoc_node = None
+                sdoc_node_uid = source_node_.get_sdoc_field(
+                    "UID", relevant_source_node_entry
+                )
+                mid = source_node_.get_sdoc_field(
+                    "MID", relevant_source_node_entry
+                )
+
+                # First merge criterion: Merge if SDoc node with same MID exists.
+                if mid is not None:
+                    sdoc_node_mid = MID(mid)
+                    merge_candidate_sdoc_node = (
+                        traceability_index.get_node_by_mid_weak(sdoc_node_mid)
+                    )
+                    if isinstance(merge_candidate_sdoc_node, SDocNode):
+                        sdoc_node = merge_candidate_sdoc_node
+                        sdoc_node_uid = sdoc_node.reserved_uid
+
+                if sdoc_node is None:
+                    # If no UID from source code field or merge-by-MID, create UID by conventional scheme.
+                    if sdoc_node_uid is None:
+                        sdoc_node_uid = f"{document_uid}/{path_to_source_file_}/{source_node_.entity_name}"
+                    # Second merge criterion: Merge if SDoc node with same UID exists.
+                    tmp_sdoc_node = traceability_index.get_node_by_uid_weak(
+                        sdoc_node_uid
+                    )
+                    if isinstance(tmp_sdoc_node, SDocNode):
+                        sdoc_node = tmp_sdoc_node
+
+                assert sdoc_node_uid is not None
+                if sdoc_node is not None:
+                    sdoc_node = assert_cast(sdoc_node, SDocNode)
+                    self.merge_sdoc_node_with_source_node(
+                        relevant_source_node_entry,
+                        source_node_,
+                        sdoc_node,
+                        document,
+                    )
+                else:
+                    sdoc_node = self.create_sdoc_node_from_source_node(
+                        source_node_,
+                        relevant_source_node_entry,
+                        sdoc_node_uid,
+                        document,
+                    )
+                    sdoc_node_uid = assert_cast(sdoc_node.reserved_uid, str)
+                    if current_top_node is None:
+                        current_top_node, created_sections = (
+                            FileTraceabilityIndex.create_source_node_section(
+                                document,
+                                path_to_source_file_,
+                                section_cache,
+                            )
+                        )
+                        for created_section in created_sections:
+                            traceability_index.graph_database.create_link(
+                                link_type=GraphLinkType.MID_TO_NODE,
+                                lhs_node=created_section.reserved_mid,
+                                rhs_node=created_section,
+                            )
+                    current_top_node.section_contents.append(sdoc_node)
+
+                # Register [ANCHOR]s from source node fields as linkable targets.
+                for node_field_ in sdoc_node.enumerate_fields():
+                    for part_ in node_field_.parts:
+                        if isinstance(part_, Anchor):
+                            traceability_index.graph_database.create_link(
+                                link_type=GraphLinkType.MID_TO_NODE,
+                                lhs_node=part_.mid,
+                                rhs_node=part_,
+                            )
+                            traceability_index.graph_database.create_link(
+                                link_type=GraphLinkType.UID_TO_NODE,
+                                lhs_node=part_.value,
+                                rhs_node=part_,
+                            )
+
+                self.connect_source_node_function(
+                    source_node_, sdoc_node_uid, traceability_info_
+                )
+                self.connect_sdoc_node_with_file_path(
+                    sdoc_node, path_to_source_file_
+                )
+                self.connect_source_node_requirements(
+                    source_node_, sdoc_node, traceability_index
+                )
+
+        # Warn if source_node was not matched by any include_source_paths, it indicates misconfiguration
+        for unused_source_node_path in unused_source_node_paths:
+            print(  # noqa: T201
+                f"warning: source_node path {unused_source_node_path} doesn't match any source file. "
+                "Hint: Check include_source_paths."
+            )
+
+        # Iterate over all generated documents to calculate all node levels.
+        for document_ in documents_with_generated_content:
+            document_iterator = SDocDocumentIterator(document_)
+            for _, _ in document_iterator.all_content(
+                print_fragments=False,
+            ):
+                pass
+
+        #
         # STEP: Resolve requirements that have forward links.
         #       Some requirements can come from the SDoc documents generated
         #       on the fly from JUnit XML documents.
@@ -286,6 +440,40 @@ class FileTraceabilityIndex:
                             form_field_index=0,
                             value=test_function,
                         )
+                    elif test_function.startswith("#NEXTEST#"):
+                        # The payload after #NEXTEST# is "<classname>|<name>"
+                        # as taken straight from the cargo-nextest JUnit XML.
+                        nextest_payload = test_function.removeprefix(
+                            "#NEXTEST#"
+                        )
+                        nextest_classname, _, nextest_name = (
+                            nextest_payload.partition("|")
+                        )
+                        possible_nextest_functions = (
+                            convert_nextest_test_to_rust_canonical_paths(
+                                nextest_classname, nextest_name
+                            )
+                        )
+                        for (
+                            possible_nextest_function_
+                        ) in possible_nextest_functions:
+                            if (
+                                possible_nextest_function_
+                                in self.map_all_function_names_to_definition_functions
+                            ):
+                                test_function = possible_nextest_function_
+                                break
+                        else:
+                            raise RuntimeError(
+                                "Could not find a matching Rust function for "
+                                "cargo-nextest test: "
+                                f"{possible_nextest_functions}"
+                            )  # pragma: no cover
+                        forward_requirement_.set_field_value(
+                            field_name="TEST_FUNCTION",
+                            form_field_index=0,
+                            value=test_function,
+                        )
                     functions = (
                         self.map_all_function_names_to_definition_functions[
                             test_function
@@ -298,7 +486,7 @@ class FileTraceabilityIndex:
                     file_posix_path = resolved_path_to_function_file
 
                     file_reference.g_file_entry = FileEntry(
-                        relation_,
+                        parent=relation_,
                         g_file_format=relation_.g_file_entry.g_file_format,
                         g_file_path=resolved_path_to_function_file,
                         g_line_range=None,
@@ -312,27 +500,109 @@ class FileTraceabilityIndex:
                         value=resolved_path_to_function_file,
                     )
 
+                    # ==========================================================
+                    # Transitively connect requirements and test results
+                    # through the test source files:
+                    # [REQUIREMENT] <-> [TEST_CASE] <-> [TEST_RESULT].
+                    # ==========================================================
+
                     #
-                    # This transitively connects requirements and test results
-                    # through the test source files.
+                    # A TEST_RESULT is linked to a TEST_SPEC/TEST_CASE node
+                    # whenever that node was itself auto-generated (or
+                    # merged) from a source_node parsed off the same test
+                    # function.
+                    #
+                    testcase_nodes: List[SDocNode] = []
+                    for source_node_ in function.parent.source_nodes:
+                        if (
+                            source_node_.function is function
+                            and source_node_.sdoc_node is not None
+                        ):
+                            testcase_nodes.append(source_node_.sdoc_node)
+
+                    for testcase_node_ in testcase_nodes:
+                        traceability_index.graph_database.create_link(
+                            link_type=GraphLinkType.NODE_TO_PARENT_NODES,
+                            lhs_node=forward_requirement_,
+                            rhs_node=testcase_node_,
+                            edge=GraphEdgeLabel.IS_RESULT_OF,
+                        )
+                        traceability_index.graph_database.create_link(
+                            link_type=GraphLinkType.NODE_TO_CHILD_NODES,
+                            lhs_node=testcase_node_,
+                            rhs_node=forward_requirement_,
+                            edge=GraphEdgeLabel.HAS_RESULT,
+                        )
+
+                    #
+                    # Two different user project setups:
+                    #
+                    # 1) A user does use the autogenerated test case nodes.
+                    # Requirements marked with @relation(REQ) on the test
+                    # function are linked to the TEST_CASE node when one
+                    # exists: [REQUIREMENT] <-> [TEST_CASE].
+                    #
+                    # 2) A user DOES NOT use the autogenerated test case nodes.
+                    # When no TEST_CASE node exists (e.g. no source_nodes config
+                    # for this file), fall back to linking the requirement
+                    # directly to the TEST_RESULT, as before:
+                    # [REQUIREMENT] <-> [TEST_RESULT].
                     #
                     for language_item_marker_ in function.markers:
                         for req_ in language_item_marker_.reqs:
                             node = traceability_index.get_node_by_uid_weak2(
                                 req_
                             )
-                            traceability_index.graph_database.create_link(
-                                link_type=GraphLinkType.NODE_TO_PARENT_NODES,
-                                lhs_node=forward_requirement_,
-                                rhs_node=node,
-                                edge="Satisfies",
-                            )
-                            traceability_index.graph_database.create_link(
-                                link_type=GraphLinkType.NODE_TO_CHILD_NODES,
-                                lhs_node=node,
-                                rhs_node=forward_requirement_,
-                                edge="IsSatisfiedBy",
-                            )
+                            if len(testcase_nodes) > 0:
+                                for testcase_node_ in testcase_nodes:
+                                    #
+                                    # When the TEST_CASE node was merged
+                                    # from this same function, the generic
+                                    # requirement-to-source-traceability
+                                    # mechanism has already linked it to
+                                    # this requirement via an unlabeled
+                                    # Parent/Child edge (see the
+                                    # source_node.markers loop above in
+                                    # this file). Replace that unlabeled
+                                    # edge with the labeled verifies/
+                                    # is verified by one so the relation is
+                                    # not shown twice.
+                                    #
+                                    traceability_index.graph_database.delete_link_weak(
+                                        link_type=GraphLinkType.NODE_TO_PARENT_NODES,
+                                        lhs_node=testcase_node_,
+                                        rhs_node=node,
+                                    )
+                                    traceability_index.graph_database.delete_link_weak(
+                                        link_type=GraphLinkType.NODE_TO_CHILD_NODES,
+                                        lhs_node=node,
+                                        rhs_node=testcase_node_,
+                                    )
+                                    traceability_index.graph_database.create_link(
+                                        link_type=GraphLinkType.NODE_TO_PARENT_NODES,
+                                        lhs_node=testcase_node_,
+                                        rhs_node=node,
+                                        edge=GraphEdgeLabel.VERIFIES,
+                                    )
+                                    traceability_index.graph_database.create_link(
+                                        link_type=GraphLinkType.NODE_TO_CHILD_NODES,
+                                        lhs_node=node,
+                                        rhs_node=testcase_node_,
+                                        edge=GraphEdgeLabel.IS_VERIFIED_BY,
+                                    )
+                            else:
+                                traceability_index.graph_database.create_link(
+                                    link_type=GraphLinkType.NODE_TO_PARENT_NODES,
+                                    lhs_node=forward_requirement_,
+                                    rhs_node=node,
+                                    edge=GraphEdgeLabel.SATISFIES,
+                                )
+                                traceability_index.graph_database.create_link(
+                                    link_type=GraphLinkType.NODE_TO_CHILD_NODES,
+                                    lhs_node=node,
+                                    rhs_node=forward_requirement_,
+                                    edge=GraphEdgeLabel.IS_SATISFIED_BY,
+                                )
                 #
                 # Validate that all requirements reference existing files.
                 #
@@ -437,12 +707,10 @@ class FileTraceabilityIndex:
             ] = trace_info_
 
             for function_ in trace_info_.functions:
-                # FIXME: Using display_name, not name. A separate exercise is
-                #        to disambiguate forward links to C++ overloaded functions.
                 if (
-                    reqs_uids := self.get_req_uids_by_function_name(
+                    reqs_uids := self.get_req_uids_by_function_names(
                         source_file.in_doctree_source_file_rel_path_posix,
-                        function_.display_name,
+                        self.get_function_matching_names(function_),
                     )
                 ) is not None:
                     self.create_traceability_info_shared_markers_for_function(
@@ -565,138 +833,6 @@ class FileTraceabilityIndex:
                             )
 
         #
-        # STEP: Create auto-generated documents created from source file comments.
-        #       Register these documents with the main traceability index.
-        #
-        documents_with_generated_content = set()
-
-        section_cache: Dict[str, Union[SDocDocumentIF, SDocNode]] = {}
-        source_nodes_config: List[SourceNodesEntry] = (
-            project_config.source_nodes
-        )
-        unused_source_node_paths = {
-            config_entry_.path for config_entry_ in source_nodes_config
-        }
-        for (
-            path_to_source_file_,
-            traceability_info_,
-        ) in self.map_paths_to_source_file_traceability_info.items():
-            if len(traceability_info_.source_nodes) == 0:
-                continue
-
-            if len(source_nodes_config) == 0:
-                continue
-
-            relevant_source_node_entry = (
-                project_config.get_relevant_source_nodes_entry(
-                    path_to_source_file_
-                )
-            )
-            if relevant_source_node_entry is not None:
-                unused_source_node_paths.discard(
-                    relevant_source_node_entry.path
-                )
-            else:
-                continue
-
-            document_uid = relevant_source_node_entry.uid
-            document = traceability_index.get_node_by_uid(document_uid)
-            documents_with_generated_content.add(document)
-            current_top_node = None
-
-            for source_node_ in traceability_info_.source_nodes:
-                if len(source_node_.fields) == 0:
-                    continue
-
-                assert source_node_.entity_name is not None
-                sdoc_node = None
-                sdoc_node_uid = source_node_.get_sdoc_field(
-                    "UID", relevant_source_node_entry
-                )
-                mid = source_node_.get_sdoc_field(
-                    "MID", relevant_source_node_entry
-                )
-
-                # First merge criterion: Merge if SDoc node with same MID exists.
-                if mid is not None:
-                    sdoc_node_mid = MID(mid)
-                    merge_candidate_sdoc_node = (
-                        traceability_index.get_node_by_mid_weak(sdoc_node_mid)
-                    )
-                    if isinstance(merge_candidate_sdoc_node, SDocNode):
-                        sdoc_node = merge_candidate_sdoc_node
-                        sdoc_node_uid = sdoc_node.reserved_uid
-
-                if sdoc_node is None:
-                    # If no UID from source code field or merge-by-MID, create UID by conventional scheme.
-                    if sdoc_node_uid is None:
-                        sdoc_node_uid = f"{document_uid}/{path_to_source_file_}/{source_node_.entity_name}"
-                    # Second merge criterion: Merge if SDoc node with same UID exists.
-                    tmp_sdoc_node = traceability_index.get_node_by_uid_weak(
-                        sdoc_node_uid
-                    )
-                    if isinstance(tmp_sdoc_node, SDocNode):
-                        sdoc_node = tmp_sdoc_node
-
-                assert sdoc_node_uid is not None
-                if sdoc_node is not None:
-                    sdoc_node = assert_cast(sdoc_node, SDocNode)
-                    self.merge_sdoc_node_with_source_node(
-                        relevant_source_node_entry,
-                        source_node_,
-                        sdoc_node,
-                        document,
-                    )
-                else:
-                    sdoc_node = self.create_sdoc_node_from_source_node(
-                        source_node_,
-                        relevant_source_node_entry,
-                        sdoc_node_uid,
-                        document,
-                    )
-                    sdoc_node_uid = assert_cast(sdoc_node.reserved_uid, str)
-                    if current_top_node is None:
-                        current_top_node, created_sections = (
-                            FileTraceabilityIndex.create_source_node_section(
-                                document,
-                                path_to_source_file_,
-                                section_cache,
-                            )
-                        )
-                        for created_section in created_sections:
-                            traceability_index.graph_database.create_link(
-                                link_type=GraphLinkType.MID_TO_NODE,
-                                lhs_node=created_section.reserved_mid,
-                                rhs_node=created_section,
-                            )
-                    current_top_node.section_contents.append(sdoc_node)
-
-                self.connect_source_node_function(
-                    source_node_, sdoc_node_uid, traceability_info_
-                )
-                self.connect_sdoc_node_with_file_path(
-                    sdoc_node, path_to_source_file_
-                )
-                self.connect_source_node_requirements(
-                    source_node_, sdoc_node, traceability_index
-                )
-
-        # Warn if source_node was not matched by any include_source_paths, it indicates misconfiguration
-        for unused_source_node_path in unused_source_node_paths:
-            print(  # noqa: T201
-                f"warning: source_node path {unused_source_node_path} doesn't match any source file. "
-                "Hint: Check include_source_paths."
-            )
-
-        # Iterate over all generated documents to calculate all node levels.
-        for document_ in documents_with_generated_content:
-            document_iterator = SDocDocumentIterator(document_)
-            for _, _ in document_iterator.all_content(
-                print_fragments=False,
-            ):
-                pass
-
-        #
         # STEP: Calculate requirements coverage by code. Sort nodes.
         #
         self.calculate_code_coverage_and_sort_nodes(traceability_index)
@@ -750,6 +886,34 @@ class FileTraceabilityIndex:
                 ) from exception
 
         return matching_req_uids if len(matching_req_uids) > 0 else None
+
+    def get_req_uids_by_function_names(
+        self, rel_path_posix: str, names: List[str]
+    ) -> Optional[List[Tuple[str, Optional[str]]]]:
+        matching_req_uids: List[Tuple[str, Optional[str]]] = []
+        seen_req_uids: Set[Tuple[str, Optional[str]]] = set()
+
+        for name_ in names:
+            reqs_uids = self.get_req_uids_by_function_name(
+                rel_path_posix, name_
+            )
+            if reqs_uids is None:
+                continue
+            for req_uid_ in reqs_uids:
+                if req_uid_ in seen_req_uids:
+                    continue
+                seen_req_uids.add(req_uid_)
+                matching_req_uids.append(req_uid_)
+
+        return matching_req_uids if len(matching_req_uids) > 0 else None
+
+    @staticmethod
+    def get_function_matching_names(function: LanguageItem) -> List[str]:
+        names = [function.display_name, function.name]
+        gcovr_name = convert_function_name_to_gcovr_style(function.name)
+        if gcovr_name not in names:
+            names.append(gcovr_name)
+        return names
 
     @staticmethod
     def is_regex_function_name(name: str) -> bool:
@@ -1018,12 +1182,13 @@ class FileTraceabilityIndex:
         sdoc_node.ng_including_document_reference = DocumentReference()
         sdoc_node_fields = source_node.get_sdoc_fields(source_node_config_entry)
         sdoc_node_fields["UID"] = sdoc_node_uid
-        if (
-            "TITLE" not in sdoc_node_fields
-            and source_node.entity_name is not None
-        ):
-            sdoc_node_fields["TITLE"] = source_node.entity_name
-        FileTraceabilityIndex.set_sdoc_node_fields(sdoc_node, sdoc_node_fields)
+        FileTraceabilityIndex.set_sdoc_node_fields(
+            sdoc_node, sdoc_node_fields, source_node
+        )
+        # Recorded so that a later TEST_RESULT resolution pass can find this
+        # node by its source_node/function and link it as a test case,
+        # even though no explicit @relation marker exists for it.
+        source_node.sdoc_node = sdoc_node
         return sdoc_node
 
     @staticmethod
@@ -1077,27 +1242,50 @@ class FileTraceabilityIndex:
                     f"Conflicting UID: {sdoc_node.reserved_uid} != {sdoc_node_fields['UID']}"
                 )
 
-        FileTraceabilityIndex.set_sdoc_node_fields(sdoc_node, sdoc_node_fields)
+        FileTraceabilityIndex.set_sdoc_node_fields(
+            sdoc_node, sdoc_node_fields, source_node
+        )
         source_node.sdoc_node = sdoc_node
 
     @staticmethod
     def set_sdoc_node_fields(
-        sdoc_node: SDocNode, sdoc_node_fields: dict[str, str]
+        sdoc_node: SDocNode,
+        sdoc_node_fields: Dict[str, str],
+        source_node: SourceNode,
     ) -> None:
-        for field_name, field_value in sdoc_node_fields.items():
-            sdoc_node_has_field = field_name in sdoc_node.ordered_fields_lookup
+        document = assert_cast(sdoc_node.get_document(), SDocDocumentIF)
+        grammar = assert_cast(document.grammar, DocumentGrammar)
+        element = grammar.elements_by_type[sdoc_node.node_type]
 
+        # Fall back to parser-suggested auto title as last option.
+        if (
+            "TITLE" not in sdoc_node_fields
+            and "TITLE" not in sdoc_node.ordered_fields_lookup
+            and source_node.entity_name is not None
+        ):
+            sdoc_node_fields["TITLE"] = source_node.entity_name
+
+        for field_name, field_value in sdoc_node_fields.items():
+            multiline = element.is_field_multiline(field_name)
+            free_text_container = SDFreeTextReader.read(field_value)
+            sdoc_node_field = SDocNodeField.from_parts(
+                sdoc_node,
+                field_name=field_name,
+                parts=free_text_container.parts,
+                multiline=multiline,
+            )
             sdoc_node.set_field_value(
                 field_name=field_name,
                 form_field_index=0,
-                value=field_value,
+                value=sdoc_node_field,
             )
 
-            if not sdoc_node_has_field:
-                new_field: SDocNodeField = sdoc_node.ordered_fields_lookup[
-                    field_name
-                ][0]
-                new_field.mark_as_source_origin()
+            # As we overwrite the field's content from the source code,
+            # we mark the field as source_origin here.
+            new_field: SDocNodeField = sdoc_node.ordered_fields_lookup[
+                field_name
+            ][0]
+            new_field.mark_as_source_origin()
 
     @staticmethod
     def create_source_node_section(
@@ -1196,7 +1384,16 @@ class FileTraceabilityIndex:
                 # I currently struggle to update the search index.
                 parent_document = sdoc_node.get_parent_or_including_document()
                 sdoc_node.reserved_mid = MID(sdoc_mid_field)
-                if parent_document.config.enable_mid:
+                assert parent_document.grammar is not None
+                node_grammar_element = (
+                    parent_document.grammar.elements_by_type.get(
+                        sdoc_node.node_type
+                    )
+                )
+                if parent_document.config.enable_mid or (
+                    node_grammar_element is not None
+                    and "MID" in node_grammar_element.fields_map
+                ):
                     sdoc_node.mid_permanent = True
 
         if not traceability_index.graph_database.has_link(

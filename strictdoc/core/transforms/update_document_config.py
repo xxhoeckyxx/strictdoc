@@ -2,17 +2,18 @@
 @relation(SDOC-SRS-57, scope=file)
 """
 
+import re
 from collections import defaultdict
 from typing import Dict, List, Optional
 
+from strictdoc.backend.sdoc.free_text_reader import SDFreeTextReader
+from strictdoc.backend.sdoc.models.anchor import Anchor
 from strictdoc.backend.sdoc.models.document import SDocDocument
-from strictdoc.backend.sdoc.models.node import SDocNode
 from strictdoc.backend.sdoc.models.document_config import (
     DocumentCustomMetadata,
     DocumentCustomMetadataKeyValuePair,
 )
 from strictdoc.backend.sdoc.models.inline_link import InlineLink
-from strictdoc.core.document_iterator import SDocDocumentIterator
 from strictdoc.core.traceability_index import (
     TraceabilityIndex,
 )
@@ -22,9 +23,8 @@ from strictdoc.core.transforms.validation_error import (
 from strictdoc.export.html.form_objects.document_config_form_object import (
     DocumentConfigFormObject,
 )
-from strictdoc.export.html.form_objects.requirement_form_object import (
-    UID_ALLOWED_CHARS_RE,
-)
+
+DOCUMENT_CUSTOM_METADATA_KEY_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_-]*")
 
 
 class UpdateDocumentConfigTransform:
@@ -67,17 +67,28 @@ class UpdateDocumentConfigTransform:
             and len(form_object.document_requirement_prefix) > 0
             else None
         )
+        existing_custom_metadata = document.config.custom_metadata
         if len(form_object.custom_metadata_fields):
             entries = [
                 DocumentCustomMetadataKeyValuePair(
-                    key=field.field_name, value=field.field_value
+                    key=field.field_name,
+                    parts=SDFreeTextReader.read(field.field_value).parts,
                 )
                 for field in form_object.custom_metadata_fields
             ]
-            document.config.custom_metadata = DocumentCustomMetadata(
-                entries=entries
+            self._update_traceability_index_with_metadata_links(
+                existing_custom_metadata, entries
             )
+            new_custom_metadata = DocumentCustomMetadata(
+                parent=document.config, entries=entries
+            )
+            for entry_ in entries:
+                entry_.parent = new_custom_metadata
+            document.config.custom_metadata = new_custom_metadata
         else:
+            self._update_traceability_index_with_metadata_links(
+                existing_custom_metadata, []
+            )
             document.config.custom_metadata = None
 
         self.traceability_index.delete_document(document)
@@ -91,6 +102,21 @@ class UpdateDocumentConfigTransform:
 
         self.traceability_index.create_document(document)
 
+    def _update_traceability_index_with_metadata_links(
+        self,
+        existing_custom_metadata: Optional[DocumentCustomMetadata],
+        new_entries: List[DocumentCustomMetadataKeyValuePair],
+    ) -> None:
+        if existing_custom_metadata is not None:
+            for existing_entry_ in existing_custom_metadata.entries:
+                for part_ in existing_entry_.parts:
+                    if isinstance(part_, InlineLink):
+                        self.traceability_index.remove_inline_link(part_)
+        for new_entry_ in new_entries:
+            for part_ in new_entry_.parts:
+                if isinstance(part_, InlineLink):
+                    self.traceability_index.create_inline_link(part_)
+
     def validate(
         self,
         form_object: DocumentConfigFormObject,
@@ -101,39 +127,6 @@ class UpdateDocumentConfigTransform:
 
         if len(form_object.document_title) == 0:
             errors["TITLE"].append("Document title must not be empty.")
-
-        # Enforce the same UID character set as for node UIDs and
-        # the SDoc grammar (see TextX pattern '([\w]+[\w()\-\/:. ]*)').
-        if (
-            form_object.document_uid is not None
-            and len(form_object.document_uid) > 0
-            and UID_ALLOWED_CHARS_RE.match(form_object.document_uid) is None
-        ):
-            errors["UID"].append(
-                "UID contains invalid characters. Allowed "
-                "characters are letters, digits, underscore, "
-                "parentheses, '-', '/', '.', ':', and spaces."
-            )
-
-        # Validate UIDs of all nodes in this document as well. This catches
-        # invalid UIDs that might have been introduced earlier (e.g. by
-        # manual edits or older tools) when the user tries to save the
-        # document configuration via the web UI.
-        iterator = SDocDocumentIterator(document)
-        for node, _ in iterator.all_content():
-            if not isinstance(node, SDocNode):
-                continue
-            if node.reserved_uid is None:
-                continue
-            if UID_ALLOWED_CHARS_RE.match(node.reserved_uid) is None:
-                errors["UID"].append(
-                    "UID contains invalid characters. Allowed "
-                    "characters are letters, digits, underscore, "
-                    "parentheses, '-', '/', '.', ':', and spaces."
-                )
-                # One error is enough to prevent saving; no need to
-                # list every single offending node here.
-                break
 
         # Ensure that UID doesn't have any incoming links if it is going to be
         # renamed or removed.
@@ -157,18 +150,45 @@ class UpdateDocumentConfigTransform:
                     )
 
         for metadata_field in form_object.custom_metadata_fields:
+            metadata_error_key = f"METADATA[{metadata_field.field_mid}]"
             if len(metadata_field.field_name) == 0:
-                errors[f"METADATA[{metadata_field.field_mid}]"].append(
-                    "Key must not be empty."
+                errors[metadata_error_key].append("Key must not be empty.")
+            elif (
+                DOCUMENT_CUSTOM_METADATA_KEY_RE.fullmatch(
+                    metadata_field.field_name
                 )
-            if not metadata_field.field_name[0].isalpha():
-                errors[f"METADATA[{metadata_field.field_mid}]"].append(
-                    "Key must begin with a letter."
+                is None
+            ):
+                # Keep this validation aligned with DocumentCustomMetadataKey
+                # in the SDOC grammar so saved documents remain parseable.
+                errors[metadata_error_key].append(
+                    "Key must start with an ASCII letter or underscore and "
+                    "contain only ASCII letters, digits, underscores, or "
+                    "hyphens."
                 )
-            if " " in metadata_field.field_name[0]:
-                errors[f"METADATA[{metadata_field.field_mid}]"].append(
-                    "Key must not contain spaces."
+            if len(metadata_field.field_value) == 0:
+                errors[metadata_error_key].append("Value must not be empty.")
+            else:
+                free_text_container = SDFreeTextReader.read(
+                    metadata_field.field_value
                 )
+                for part_ in free_text_container.parts:
+                    if isinstance(part_, InlineLink):
+                        if (
+                            self.traceability_index.get_linkable_node_by_uid_weak(
+                                part_.link
+                            )
+                            is None
+                        ):
+                            errors[metadata_error_key].append(
+                                "METADATA value references a UID "
+                                f"that does not exist: {part_.link}."
+                            )
+                    elif isinstance(part_, Anchor):
+                        errors[metadata_error_key].append(
+                            "METADATA values do not support "
+                            "[ANCHOR: ...] markers, only [LINK: UID]."
+                        )
 
         if len(errors):
             raise MultipleValidationError(

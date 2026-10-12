@@ -13,6 +13,14 @@ from invoke import task
 from developer.git.commit_validator import (
     validate_commits_locally_or_ci,
 )
+from strictdoc.core.environment import (
+    BINARY_HTML_STATIC_DIR,
+    BINARY_HTML_TEMPLATES_DIR,
+    HTML_STATIC_DIRS,
+    HTML_TEMPLATE_DIRS,
+)
+from strictdoc.core.project_config import ProjectConfigDefault
+from tools.server_check import free_strictdoc_port
 
 # Specifying encoding because Windows crashes otherwise when running Invoke
 # tasks below:
@@ -27,10 +35,44 @@ sys.stdout = open(1, "w", encoding="utf-8", closefd=False, buffering=1)
 STRICTDOC_TMP_DIR = os.path.join(tempfile.gettempdir(), "strictdoc_tmp_dir")
 TEST_REPORTS_DIR = "build/test_reports"
 
+# Redirect all __pycache__ output (from Invoke itself and every subprocess it
+# spawns: pytest, mypy, plain python invocations, etc.) into a single folder,
+# instead of littering __pycache__ directories across the source tree.
+os.environ["PYTHONPYCACHEPREFIX"] = os.path.abspath("build/pycache")
+
+
+def get_pyinstaller_html_template_data_options() -> str:
+    return "\n".join(
+        f'--add-data "{template_dir}{os.pathsep}{BINARY_HTML_TEMPLATES_DIR}"'
+        for template_dir in HTML_TEMPLATE_DIRS
+    )
+
+
+def get_pyinstaller_html_static_data_options() -> str:
+    return "\n".join(
+        f'--add-data "{static_dir}{os.pathsep}{BINARY_HTML_STATIC_DIR}"'
+        for static_dir in HTML_STATIC_DIRS
+    )
+
+
+def get_nuitka_html_template_data_options() -> str:
+    return "\n".join(
+        f'--include-data-dir="{template_dir}={BINARY_HTML_TEMPLATES_DIR}"'
+        for template_dir in HTML_TEMPLATE_DIRS
+    )
+
+
+def get_nuitka_html_static_data_options() -> str:
+    return "\n".join(
+        f'--include-data-dir="{static_dir}={BINARY_HTML_STATIC_DIR}"'
+        for static_dir in HTML_STATIC_DIRS
+    )
+
 
 # To prevent all tasks from building to the same virtual environment.
-# All values correspond to the configuration in the tox.ini config file.
-class ToxEnvironment(str, Enum):
+# Each value is a uv dependency group name declared in pyproject.toml's
+# [dependency-groups].
+class UvEnvironment(str, Enum):
     DEVELOPMENT = "development"
     CHECK = "check"
     DOCUMENTATION = "documentation"
@@ -59,38 +101,77 @@ def run_invoke(
     )
 
 
-def run_invoke_with_tox(
+def uv_venv_dir(environment_type: UvEnvironment) -> str:
+    # Each flavor gets its own venv so, e.g., pyinstaller/twine deps never
+    # mix with playwright/pytest deps.
+    return os.path.abspath(f"build/uv/{environment_type.value}")
+
+
+def uv_venv_bin_dir(environment_type: UvEnvironment) -> str:
+    return os.path.join(
+        uv_venv_dir(environment_type), "Scripts" if os.name == "nt" else "bin"
+    )
+
+
+def uv_venv_python(environment_type: UvEnvironment) -> str:
+    # An absolute path, unlike a bare "python"/"python3" on PATH: a uv/venv
+    # on Windows only ships python.exe (no python3.exe), and PATH-based
+    # lookup for a nested subprocess (e.g. tests/integration/expect_exit.py
+    # spawning STRICTDOC_EXEC itself) has been observed to resolve to the
+    # system Python instead of the venv's, even though the venv's bin/
+    # directory is first on PATH for directly-spawned commands.
+    #
+    # Forward slashes even on Windows: this value gets embedded in a lit
+    # RUN: line, which on Windows CI runs through Git Bash. A backslash
+    # path there is parsed as shell escapes (\a, \s, ... silently dropped),
+    # mangling the path; Windows itself accepts forward slashes fine.
+    python_name = "python.exe" if os.name == "nt" else "python"
+    path = os.path.join(uv_venv_bin_dir(environment_type), python_name)
+    return path.replace(os.sep, "/")
+
+
+def run_invoke_with_uv(
     context,
-    environment_type: ToxEnvironment,
+    environment_type: UvEnvironment,
     command: str,
     environment: Optional[Dict] = None,
     pty: bool = False,
 ) -> invoke.runners.Result:
-    assert isinstance(environment_type, ToxEnvironment)
+    assert isinstance(environment_type, UvEnvironment)
     assert isinstance(command, str)
 
-    tox_py_version = f"py{sys.version_info.major}{sys.version_info.minor}"
+    venv_dir = uv_venv_dir(environment_type)
+
+    # VIRTUAL_ENV: keeps it in sync with UV_PROJECT_ENVIRONMENT so uv does
+    # not warn about the two disagreeing whenever this runs from inside an
+    # already-activated venv (e.g. a developer's own .venv, or Nix's
+    # devShell).
+    # --inexact: tasks like release_local pip-install the just-built
+    # strictdoc artifact into this same venv outside of uv's tracking; a
+    # plain `uv sync` would remove it again on the next call.
+    run_invoke(
+        context,
+        f"""
+            uv sync --frozen --inexact --no-install-project
+                --group {environment_type.value}
+        """,
+        environment={
+            "UV_PROJECT_ENVIRONMENT": venv_dir,
+            "VIRTUAL_ENV": venv_dir,
+            **(environment or {}),
+        },
+    )
 
     return run_invoke(
         context,
-        f"""
-            tox
-                -e {tox_py_version}-{environment_type.value} --
-                {command}
-        """,
-        environment=environment,
+        command,
+        environment={
+            "PATH": f"{uv_venv_bin_dir(environment_type)}{os.pathsep}{os.environ['PATH']}",
+            "VIRTUAL_ENV": venv_dir,
+            **(environment or {}),
+        },
         pty=pty,
     )
-
-
-def remove_path_if_exists(path: str) -> None:
-    path_object = Path(path)
-    if not path_object.exists():
-        return
-    if path_object.is_dir():
-        shutil.rmtree(path_object, ignore_errors=True)
-    else:
-        path_object.unlink(missing_ok=True)
 
 
 @task(default=True)
@@ -102,86 +183,92 @@ def list_tasks(context):
 
 
 @task
-def clean(_context):
-    remove_path_if_exists("output")
-    remove_path_if_exists("docs/sphinx/build")
+def clean(context):
+    # https://unix.stackexchange.com/a/689930/77389
+    clean_command = r"""
+        rm -rf output/ &&
+        find tests/ -type d \( -name output -o -name Output \) -exec rm -rf {} +
+    """
+    run_invoke(context, clean_command)
 
 
 @task(aliases=["s"])
-def server(context, input_path=".", config=None):
+def server(context, input_path=".", config=None, port=None):
     assert os.path.isdir(input_path), input_path
     if config is not None:
         assert os.path.isfile(config), config
     config_argument = f"--config {config}" if config is not None else ""
-    run_invoke_with_tox(
+    port_argument = f"--port {port}" if port is not None else ""
+
+    try:
+        should_continue = free_strictdoc_port(
+            port
+            if port is not None
+            else ProjectConfigDefault.DEFAULT_SERVER_PORT
+        )
+    except OSError as error:
+        print(error, file=sys.stderr)  # noqa: T201
+        return
+
+    if not should_continue:
+        return
+
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.DEVELOPMENT,
+        UvEnvironment.DEVELOPMENT,
         f"""
             python -m strictdoc.cli.main
                 --debug
+                --development
                 server {input_path} {config_argument}
                     --host 127.0.0.1
+                    {port_argument}
                     --reload
+                    --watch
         """,
+        pty=True,
+    )
+
+
+@task(aliases=["scs"])
+def screencast_server(context, focus=None, edit=False):
+    """
+    Manual dev server for tests/screencast scenarios: starts StrictDoc on a
+    scenario's project (the shared demo fixture by default, or another
+    scenario's project via --focus), for inspecting it in the browser.
+
+    By default this serves a disposable copy, rebuilt fresh every time, so
+    nothing done through the UI persists. Pass --edit to serve the real,
+    persistent files instead (the shared fixture itself, or a generated
+    project reused across restarts) when intentionally editing them.
+    """
+
+    focus_argument = f"--focus {focus}" if focus is not None else ""
+    edit_argument = "--edit" if edit else ""
+
+    run_invoke_with_uv(
+        context,
+        UvEnvironment.CHECK,
+        f"python tests/screencast/run_server.py {focus_argument} {edit_argument}",
     )
 
 
 @task(aliases=["d"])
 def docs(context):
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.DOCUMENTATION,
+        UvEnvironment.DOCUMENTATION,
         """
-            python3 -m strictdoc.cli.main
+            python -m strictdoc.cli.main
                 export .
-                    --formats=html
+                    --formats=html,html2pdf
                     --output-dir output/strictdoc_website
                     --project-title "StrictDoc"
         """,
     )
 
-    run_invoke_with_tox(
-        context,
-        ToxEnvironment.DOCUMENTATION,
-        """
-            python3 -m strictdoc.cli.main
-                export ./
-                    --formats=rst
-                    --output-dir output/sphinx
-                    --project-title "StrictDoc"
-        """,
-    )
 
-    run_invoke_with_tox(
-        context,
-        ToxEnvironment.DOCUMENTATION,
-        """
-            cp -r output/sphinx/rst/docs/* docs/sphinx/source/ &&
-            cp -r output/sphinx/rst/docs_extra/* docs/sphinx/source/ &&
-            mkdir -p docs/sphinx/source/_assets/ &&
-            cp -v docs/_assets/* docs/sphinx/source/_assets/
-        """,
-    )
-
-    run_invoke_with_tox(
-        context,
-        ToxEnvironment.DOCUMENTATION,
-        """
-            make --directory docs/sphinx html latexpdf SPHINXOPTS="-W --keep-going"
-        """,
-    )
-
-    run_invoke(
-        context,
-        (
-            """
-                open docs/sphinx/build/latex/strictdoc.pdf
-            """
-        ),
-    )
-
-
-@task(aliases=["tus"])
+@task(clean, aliases=["tus"])
 def test_unit_server(context, focus=None):
     focus_argument = f"-k {focus}" if focus is not None else ""
 
@@ -191,9 +278,9 @@ def test_unit_server(context, focus=None):
 
     path_to_coverage_file = f"{cwd}/build/coverage/unit_server/.coverage"
 
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         f"""
             coverage run
             --rcfile=.coveragerc.unit_server
@@ -203,7 +290,7 @@ def test_unit_server(context, focus=None):
                 {focus_argument}
                 --junit-xml={TEST_REPORTS_DIR}/tests_unit_server.pytest.junit.xml
                 -o junit_suite_name="StrictDoc Web Server Unit Tests"
-                -o cache_dir=build/pytest_unit_server
+                -o cache_dir=build/pytest_cache/unit_server
         """,
     )
 
@@ -214,9 +301,9 @@ def test_unit_server_report(context):
 
     path_to_coverage_file = f"{cwd}/build/coverage/unit_server/.coverage"
 
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         f"""
             coverage html
                 --rcfile=.coveragerc.unit_server
@@ -300,7 +387,7 @@ def test_end2end(
             {headless_argument}
             --junit-xml={TEST_REPORTS_DIR}/tests_end2end.pytest.junit.xml
             -o junit_suite_name="StrictDoc End-to-End Tests"
-            -o cache_dir=build/pytest_end2end
+            -o cache_dir=build/pytest_cache/end2end
             tests/end2end
     """
     if test_path:
@@ -308,21 +395,55 @@ def test_end2end(
 
     Path(TEST_REPORTS_DIR).mkdir(parents=True, exist_ok=True)
 
-    # On Windows, GitHub Actions fails with:
-    # response = {'status': 500, 'value':
-    # '{"value":{"error":"unknown error",
-    # "message":"unknown error: cannot find Chrome binary",  # noqa: ERA001
-    # This very likely has to do with PATH isolation that Tox does.
-    # FIXME: If you are a Windows expert, please fix this to run on Tox.
-    if os.name == "nt":
-        run_invoke(context, test_command)
-        return
-
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         test_command,
         environment=environment,
+    )
+
+
+@task(aliases=["tsc"])
+def test_screencast(context, *, focus=None, record_video=False):
+    """
+    Runs the tests/screencast scenarios: fast pass/fail checks by default,
+    or (re)recording of the corresponding .webm videos with --record-video.
+    """
+
+    focus_argument = f"-k {focus}" if focus is not None else ""
+    record_video_argument = "--strictdoc-record-video" if record_video else ""
+
+    Path(TEST_REPORTS_DIR).mkdir(parents=True, exist_ok=True)
+
+    test_command = f"""
+        pytest
+        --capture=no
+        {focus_argument}
+        {record_video_argument}
+        --junit-xml={TEST_REPORTS_DIR}/tests_screencast.pytest.junit.xml
+        -o junit_suite_name="StrictDoc Screencast Tests"
+        -o cache_dir=build/pytest_screencast
+        tests/screencast/scenarios
+    """
+
+    run_invoke_with_uv(context, UvEnvironment.CHECK, test_command)
+
+
+@task(aliases=["scov"])
+def screencast_optimize_video(context, focus=None):
+    """
+    Converts recorded tests/screencast/output/*.webm into muted,
+    web-optimized .webm (VP9) and .mp4 (H.264) pairs under
+    tests/screencast/output/web/, ready to hand off to the product website.
+
+    Run `invoke test-screencast --record-video` first to produce the raw
+    recordings this reads from.
+    """
+
+    focus_argument = f"--focus {focus}" if focus is not None else ""
+
+    run_invoke(
+        context, f"python tests/screencast/optimize_video.py {focus_argument}"
     )
 
 
@@ -357,24 +478,24 @@ def test_unit(context, coverage=False, focus=None, path=None, output=False):
         else "pytest"
     )
 
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         f"""
             {pytest_command}
             {focus_argument}
             {output_argument}
             --junit-xml={TEST_REPORTS_DIR}/tests_unit.pytest.junit.xml
-            -o cache_dir=build/pytest_unit_with_coverage
+            -o cache_dir=build/pytest_cache/unit
             -o junit_suite_name="StrictDoc Unit Tests"
             -p no:seleniumbase
             {path}
         """,
     )
     if coverage and not focus and path == "tests/unit":
-        run_invoke_with_tox(
+        run_invoke_with_uv(
             context,
-            ToxEnvironment.CHECK,
+            UvEnvironment.CHECK,
             f"""
                 coverage report
                     --sort=cover
@@ -390,9 +511,9 @@ def test_unit_report(context):
 
     path_to_coverage_file = f"{cwd}/build/coverage/unit/.coverage"
 
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         f"""
             coverage html
                 --rcfile=.coveragerc.unit
@@ -401,9 +522,10 @@ def test_unit_report(context):
     )
 
 
-@task(aliases=["ti"])
+@task(clean, aliases=["ti"])
 def test_integration(
     context,
+    *,
     focus=None,
     debug=False,
     no_parallelization=False,
@@ -412,7 +534,7 @@ def test_integration(
     strictdoc=None,
     html2pdf=False,
     shard=None,
-    environment=ToxEnvironment.CHECK,
+    environment=UvEnvironment.CHECK,
 ):
     """
     @relation(SDOC-SRS-45, scope=function)
@@ -421,7 +543,7 @@ def test_integration(
     cwd = os.getcwd()
 
     if strictdoc is None:
-        strictdoc_exec = "python3 -m strictdoc.cli.main"
+        strictdoc_exec = f"{uv_venv_python(environment)} -m strictdoc.cli.main"
     else:
         strictdoc_exec = strictdoc
 
@@ -486,8 +608,22 @@ def test_integration(
         test_folder = f"{cwd}/tests/integration/features/html2pdf"
         test_output_dir = "build/tests_integration_html2pdf"
 
-    remove_path_if_exists(test_output_dir)
-    remove_path_if_exists(STRICTDOC_TMP_DIR)
+    # The command sometimes exits with 1 even if the files are deleted.
+    # warn=True ensures that the execution continues.
+    run_invoke(
+        context,
+        f"""
+        rm -rf {test_output_dir}
+        """,
+        warn=True,
+    )
+
+    run_invoke(
+        context,
+        f"""
+        rm -rf {STRICTDOC_TMP_DIR}
+        """,
+    )
 
     Path(STRICTDOC_TMP_DIR).mkdir(exist_ok=True)
     Path(TEST_REPORTS_DIR).mkdir(parents=True, exist_ok=True)
@@ -512,15 +648,7 @@ def test_integration(
         {test_folder}
     """
 
-    # It looks like LIT does not open the RUN: subprocesses in the same
-    # environment from which it itself is run from. This issue has been known by
-    # us for a couple of years by now. Not using Tox on Windows for the time
-    # being.
-    if os.name == "nt":
-        run_invoke(context, itest_command)
-        return
-
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
         environment,
         itest_command,
@@ -530,9 +658,9 @@ def test_integration(
 
 @task
 def coverage_combine(context):
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
             coverage combine
                 --data-file build/coverage/.coverage.combined
@@ -544,18 +672,18 @@ def coverage_combine(context):
                 build/coverage/unit_server/.coverage
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
             coverage html
                 --rcfile .coveragerc.combined
                 --data-file build/coverage/.coverage.combined
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
             coverage json
                 --rcfile .coveragerc.combined
@@ -572,13 +700,13 @@ def lint_ruff_format(context):
     @relation(SDOC-SRS-42, scope=function)
     """
 
-    result: invoke.runners.Result = run_invoke_with_tox(
+    result: invoke.runners.Result = run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
             ruff
                 format
-                --cache-dir build/ruff
+                --cache-dir build/ruff_cache
                 *.py
                 developer/
                 docs/
@@ -603,11 +731,11 @@ def lint_ruff(context):
     @relation(SDOC-SRS-42, scope=function)
     """
 
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            ruff check . --fix --exit-non-zero-on-fix --cache-dir build/ruff
+            ruff check . --fix --exit-non-zero-on-fix --cache-dir build/ruff_cache
         """,
     )
 
@@ -626,9 +754,9 @@ def lint_mypy(context):
     # --disallow-any-decorated
     # - type-abstract. It is ignored on purpose because of assert_cast()
     #   implementation. See https://stackoverflow.com/a/74073453/598057.
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
             mypy docs/
                  strictdoc/
@@ -637,7 +765,7 @@ def lint_mypy(context):
                 --show-error-codes
                 --disable-error-code=import
                 --disable-error-code=type-abstract
-                --cache-dir=build/mypy
+                --cache-dir=build/mypy_cache
                 --extra-checks
 
                 --strict
@@ -666,17 +794,26 @@ def lint_mypy(context):
 @task
 def lint_format_js(context):
     # NOTE: Could not find the '--' equivalent for -w80.
-    result: invoke.runners.Result = run_invoke_with_tox(
+    result: invoke.runners.Result = run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
             js-beautify
                 --indent-size=2
                 --end-with-newline
                 --replace
                 -w100
+                strictdoc/export/html/_static/autocompletable_field.js
+                strictdoc/export/html/_static/copy_to_clipboard.js
+                strictdoc/export/html/_static/deletable_field.js
+                strictdoc/export/html/_static/draggable_list.js
+                strictdoc/export/html/_static/editable_field.js
+                strictdoc/export/html/_static/modal.js
+                strictdoc/export/html/_static/movable_field.js
+                strictdoc/export/html/_static/scroll_into_view.js
                 strictdoc/export/html/_static/static_html_search.js
-                strictdoc/export/html/_static/stable_uri_forwarder.js
+                strictdoc/export/html/_static/tabs.js
+                strictdoc/features/project_index/assets/stable_uri_forwarder.js
         """,
     )
     # Ruff always exits with 0, so we handle the output.
@@ -698,18 +835,18 @@ def lint_commit(context):  # noqa: ARG001
 def lint_fixit(context, fix=False, auto=False, path="strictdoc/"):
     if fix:
         auto_argument = "--automatic" if auto else ""
-        run_invoke_with_tox(
+        run_invoke_with_uv(
             context,
-            ToxEnvironment.CHECK,
+            UvEnvironment.CHECK,
             f"""
                 fixit fix {path} {auto_argument}
             """,
             pty=True,
         )
     else:
-        run_invoke_with_tox(
+        run_invoke_with_uv(
             context,
-            ToxEnvironment.CHECK,
+            UvEnvironment.CHECK,
             f"""
                 fixit lint --diff {path}
             """,
@@ -763,102 +900,102 @@ def changelog(context, github_token):
 
 @task
 def check_dead_links(context):
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_01_user_guide.sdoc
+            python tools/link_health.py docs/strictdoc_01_user_guide.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_02_feature_map.sdoc
+            python tools/link_health.py docs/strictdoc_02_feature_map.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_03_faq.sdoc
+            python tools/link_health.py docs/strictdoc_03_faq.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_04_release_notes.sdoc
+            python tools/link_health.py docs/strictdoc_04_release_notes.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_05_troubleshooting.sdoc
+            python tools/link_health.py docs/strictdoc_05_troubleshooting.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_10_contributing.sdoc
+            python tools/link_health.py docs/strictdoc_10_contributing.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_11_developer_guide.sdoc
+            python tools/link_health.py docs/strictdoc_11_developer_guide.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_24_development_plan.sdoc
+            python tools/link_health.py docs/strictdoc_24_development_plan.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_20_l1_system_requirements.sdoc
+            python tools/link_health.py docs/strictdoc_20_l1_system_requirements.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_21_l2_high_level_requirements.sdoc
+            python tools/link_health.py docs/strictdoc_21_l2_high_level_requirements.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py docs/strictdoc_25_design.sdoc
+            python tools/link_health.py docs/strictdoc_25_design.sdoc
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py CONTRIBUTING.md
+            python tools/link_health.py CONTRIBUTING.md
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py NOTICE
+            python tools/link_health.py NOTICE
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.CHECK,
+        UvEnvironment.CHECK,
         """
-            python3 tools/link_health.py README.md
+            python tools/link_health.py README.md
         """,
     )
 
@@ -868,7 +1005,7 @@ def release_local(context):
     run_invoke(
         context,
         """
-            rm -rfv dist/ build/
+            rm -rf build/
         """,
     )
     run_invoke(
@@ -877,29 +1014,29 @@ def release_local(context):
             pip uninstall strictdoc -y
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.RELEASE_LOCAL,
+        UvEnvironment.RELEASE_LOCAL,
         """
-            python -m build
+            python -m build --outdir build/dist
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.RELEASE_LOCAL,
+        UvEnvironment.RELEASE_LOCAL,
         """
-            twine check dist/*
+            twine check build/dist/*
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.RELEASE_LOCAL,
+        UvEnvironment.RELEASE_LOCAL,
         """
-            pip install dist/*.tar.gz
+            pip install build/dist/*.tar.gz
         """,
     )
     test_integration(
-        context, strictdoc="strictdoc", environment=ToxEnvironment.RELEASE_LOCAL
+        context, strictdoc="strictdoc", environment=UvEnvironment.RELEASE_LOCAL
     )
 
 
@@ -945,31 +1082,31 @@ def release(context, test_pypi=False, username=None, password=None):
     run_invoke(
         context,
         """
-            rm -rfv dist/
+            rm -rf build/dist/
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.RELEASE,
+        UvEnvironment.RELEASE,
         """
-            python3 -m build
+            python -m build --outdir build/dist
         """,
     )
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.RELEASE,
+        UvEnvironment.RELEASE,
         """
-            twine check dist/*
+            twine check build/dist/*
         """,
     )
     # The token is in a core developer's .pypirc file.
     # https://test.pypi.org/manage/account/token/
     # https://packaging.python.org/en/latest/specifications/pypirc/#pypirc
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.RELEASE,
+        UvEnvironment.RELEASE,
         f"""
-            twine upload dist/strictdoc-*.tar.gz dist/strictdoc-*.whl
+            twine upload build/dist/strictdoc-*.tar.gz build/dist/strictdoc-*.whl
                 {repository_argument_or_none}
                 {user_password}
         """,
@@ -979,6 +1116,8 @@ def release(context, test_pypi=False, username=None, password=None):
 @task
 def release_pyinstaller(context):
     path_to_pyi_dist = "/tmp/strictdoc"
+    html_template_data_options = get_pyinstaller_html_template_data_options()
+    html_static_data_options = get_pyinstaller_html_static_data_options()
 
     # The --hidden-import strictdoc.server.app flag is needed because without
     # it, the following is produced:
@@ -987,6 +1126,18 @@ def release_pyinstaller(context):
     # Solution found here: https://stackoverflow.com/a/71340437/598057
     # This behavior is not surprising because that's how the uvicorn loads the
     # application separately from the parent process.
+    #
+    # Compatibility modules can be imported by user-provided statistics
+    # generators at runtime. PyInstaller cannot discover these imports
+    # statically because the generators live outside of StrictDoc's package.
+    #
+    # --hidden-import strictdoc.api is needed for the same reason:
+    # strictdoc.api is never imported anywhere inside StrictDoc's own
+    # package (only by dynamically-loaded, external files such as a
+    # project's own strictdoc_config.py, custom statistics generators, or
+    # custom plugins), so PyInstaller's static analysis -- which walks
+    # imports starting from strictdoc/cli/main.py -- never discovers it on
+    # its own.
     command = f"""
         pyinstaller
             --clean
@@ -994,24 +1145,28 @@ def release_pyinstaller(context):
             --noconfirm
             --additional-hooks-dir developer/pyinstaller_hooks
             --distpath {path_to_pyi_dist}
-            --hidden-import strictdoc.export.rst.strictdoc_lexer
+            --hidden-import strictdoc.api
+            --hidden-import strictdoc.backend.rst.strictdoc_lexer
+            --hidden-import strictdoc.core.statistics.metric
+            --hidden-import strictdoc.export.html.generators.project_statistics
+            --hidden-import strictdoc.export.html.generators.view_objects.project_statistics_view_object
+            --hidden-import strictdoc.export.html.generators.view_objects.project_tree_stats
             --hidden-import strictdoc.server.app
-            --add-data strictdoc/export/html/templates:templates/html
-            --add-data strictdoc/export/rst/templates:templates/rst
-            --add-data strictdoc/export/html/_static:_static
-            --add-data strictdoc/export/html/_static_extra:_static_extra
+            {html_template_data_options}
+            {html_static_data_options}
+            --add-data strictdoc/backend/rst/templates:templates/rst
             strictdoc/cli/main.py
     """
 
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.PYINSTALLER,
+        UvEnvironment.PYINSTALLER,
         """
     pyinstaller --version
     """,
     )
 
-    run_invoke_with_tox(context, ToxEnvironment.PYINSTALLER, command)
+    run_invoke_with_uv(context, UvEnvironment.PYINSTALLER, command)
 
 
 @task
@@ -1023,18 +1178,18 @@ def watch(context, sdocs_path="."):
             --output-dir output/
     """
 
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.DEVELOPMENT,
+        UvEnvironment.DEVELOPMENT,
         f"""
             {strictdoc_command}
         """,
     )
 
     paths_to_watch = "."
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.DEVELOPMENT,
+        UvEnvironment.DEVELOPMENT,
         f"""
             watchmedo shell-command
             --patterns="*.py;*.sdoc;*.jinja;*.html;*.css;*.js"
@@ -1049,9 +1204,9 @@ def watch(context, sdocs_path="."):
 
 @task
 def run(context, command):
-    run_invoke_with_tox(
+    run_invoke_with_uv(
         context,
-        ToxEnvironment.DEVELOPMENT,
+        UvEnvironment.DEVELOPMENT,
         f"""
             {command}
         """,
@@ -1060,6 +1215,9 @@ def run(context, command):
 
 @task
 def nuitka(context):
+    html_template_data_options = get_nuitka_html_template_data_options()
+    html_static_data_options = get_nuitka_html_static_data_options()
+
     run_invoke(
         context,
         f"""
@@ -1072,10 +1230,9 @@ def nuitka(context):
             --include-module=docutils
             --include-module=docutils.readers.standalone
             --include-module=docutils.parsers.rst
-            --include-data-dir=strictdoc/export/html/templates=templates/html
-            --include-data-dir=strictdoc/export/rst/templates=templates/rst
-            --include-data-dir=strictdoc/export/html/_static=_static
-            --include-data-dir=strictdoc/export/html/_static_extra/mathjax=_static_extra/mathjax
+            {html_template_data_options}
+            {html_static_data_options}
+            --include-data-dir=strictdoc/backend/rst/templates=templates/rst
             --include-package-data=docutils
             strictdoc/cli/main.py
         """,
@@ -1217,7 +1374,7 @@ def drawio(context):
                 --export
                 --format png
                 -o {path_to_png_}
-                --page-index 0
+                --page-index 1
                 {path_to_drawio_}
             """,
             pty=True,

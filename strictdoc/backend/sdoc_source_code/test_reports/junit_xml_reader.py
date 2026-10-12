@@ -3,8 +3,9 @@
 """
 
 import os
+import re
 from enum import IntEnum
-from typing import Any, List, Optional, Type
+from typing import Any, Dict, List, Optional, Set, Type
 
 import bs4
 from bs4 import BeautifulSoup
@@ -12,6 +13,9 @@ from bs4 import BeautifulSoup
 from strictdoc.backend.sdoc.document_reference import DocumentReference
 from strictdoc.backend.sdoc.models.document import SDocDocument
 from strictdoc.backend.sdoc.models.document_grammar import DocumentGrammar
+from strictdoc.backend.sdoc.models.grammar_element import (
+    GrammarElementFieldString,
+)
 from strictdoc.backend.sdoc.models.node import SDocNode, SDocNodeField
 from strictdoc.backend.sdoc.models.reference import (
     FileEntry,
@@ -23,28 +27,43 @@ from strictdoc.core.project_config import ProjectConfig
 from strictdoc.helpers.cast import assert_cast, assert_optional_cast
 from strictdoc.helpers.file_system import file_open_read_utf8
 from strictdoc.helpers.paths import path_to_posix_path
+from strictdoc.helpers.string import is_uppercase_underscore_string
 
 
-class JUnitXMLFormat(IntEnum):
+class JUnitXMLDialect(IntEnum):
     LLVM_LIT = 1
     CTEST = 2
     GOOGLE_TEST = 3
     PYTEST = 4
+    CARGO_NEXTEST = 5
 
     @staticmethod
-    def create_from_path(file_path: str) -> "JUnitXMLFormat":
+    def create_from_path(file_path: str) -> "JUnitXMLDialect":
         if file_path.endswith(".lit.junit.xml"):
-            return JUnitXMLFormat.LLVM_LIT
+            return JUnitXMLDialect.LLVM_LIT
         if file_path.endswith(".ctest.junit.xml"):
-            return JUnitXMLFormat.CTEST
+            return JUnitXMLDialect.CTEST
         if file_path.endswith(".gtest.junit.xml"):
-            return JUnitXMLFormat.GOOGLE_TEST
+            return JUnitXMLDialect.GOOGLE_TEST
         if file_path.endswith(".pytest.junit.xml"):
-            return JUnitXMLFormat.PYTEST
+            return JUnitXMLDialect.PYTEST
+        if file_path.endswith(".nextest.junit.xml"):
+            return JUnitXMLDialect.CARGO_NEXTEST
         raise NotImplementedError(file_path)
 
 
 class JUnitXMLReader:
+    _SAFE_SDOC_FIELD_NAME_REGEX: re.Pattern[str] = re.compile(r"[^A-Za-z0-9]")
+    _TEST_RESULT_RESERVED_FIELD_NAMES: Set[str] = {
+        "UID",
+        "TEST_PATH",
+        "TEST_FUNCTION",
+        "DURATION",
+        "STATUS",
+        "TITLE",
+        "STATEMENT",
+    }
+
     @classmethod
     def read_from_file(
         cls: Type["JUnitXMLReader"],
@@ -72,7 +91,7 @@ class JUnitXMLReader:
         except Exception as exception:  # pylint: disable=broad-except
             raise RuntimeError(str(exception)) from None
 
-        xml_format = JUnitXMLFormat.create_from_path(doc_file.full_path)
+        xml_format = JUnitXMLDialect.create_from_path(doc_file.full_path)
 
         document = SDocDocument(
             mid=None,
@@ -84,10 +103,6 @@ class JUnitXMLReader:
             autogen=True,
         )
         document.ng_including_document_reference = DocumentReference()
-        grammar = DocumentGrammar.create_for_test_report(document)
-        document.grammar = grammar
-        document.config.requirement_style = "Table"
-
         xml_testsuite_list: List[bs4.element.Tag]
 
         xml_testsuites: Optional[bs4.element.Tag] = assert_optional_cast(
@@ -113,12 +128,32 @@ class JUnitXMLReader:
                 xml_testsuite_list[0]["name"], str
             )
 
+        property_field_names: Dict[str, str] = (
+            cls._collect_property_field_names(xml_testsuite_list)
+        )
+        additional_fields: List[GrammarElementFieldString] = [
+            GrammarElementFieldString(
+                parent=None,
+                title=field_name_,
+                human_title=property_name_,
+                required="False",
+            )
+            for property_name_, field_name_ in property_field_names.items()
+        ]
+        grammar = DocumentGrammar.create_for_test_report(
+            document, additional_fields=additional_fields
+        )
+        document.grammar = grammar
+        document.config.requirement_style = "Table"
+
         for xml_testsuite_ in xml_testsuite_list:
             assert isinstance(xml_testsuite_, bs4.element.Tag)
             title = assert_cast(xml_testsuite_["name"], str)
             total_tests: int = int(str(xml_testsuite_["tests"]))
             total_failures: int = int(str(xml_testsuite_["failures"]))
-            total_skipped: int = int(str(xml_testsuite_["skipped"]))
+            # The "skipped" attribute is optional on <testsuite>. cargo-nextest
+            # for instance does not emit it.
+            total_skipped: int = int(str(xml_testsuite_.get("skipped", "0")))
             total_success: int = total_tests - total_failures - total_skipped
 
             test_suite_section = SDocNode.create_section(
@@ -217,7 +252,7 @@ class JUnitXMLReader:
                 # the test names and paths are stored. Each tool's output is
                 # handled separately below.
                 #
-                if xml_format == JUnitXMLFormat.LLVM_LIT:
+                if xml_format == JUnitXMLDialect.LLVM_LIT:
                     #
                     # Example produced by LLVM LIT:
                     # <testcase classname="StrictDoc integration tests.tests/integration" name="test.ignored.itest" time="5.50"/>
@@ -232,8 +267,8 @@ class JUnitXMLReader:
                     if rel_path_to_test_suite is None:
                         raise RuntimeError(
                             "The relative path to the test suite must be "
-                            "registered in the strictdoc.toml config under the "
-                            "'test_report_root_dict' option: "
+                            "registered in the strictdoc_config.py config under "
+                            "the 'test_report_root_dict' option: "
                             f"{doc_file.rel_path.relative_path_posix}"
                         )
 
@@ -259,12 +294,12 @@ class JUnitXMLReader:
                     test_case_node_title = rel_path_to_test
                     test_case_node_duration = xml_testcase_time
                     test_case_node_test_path = rel_path_to_test
-                elif xml_format == JUnitXMLFormat.CTEST:
+                elif xml_format == JUnitXMLDialect.CTEST:
                     test_case_node_uid = xml_testcase_name
                     test_case_node_title = xml_testcase_name
                     test_case_node_duration = xml_testcase_time
                     test_case_node_test_function = "#GTEST#" + xml_testcase_name
-                elif xml_format == JUnitXMLFormat.GOOGLE_TEST:
+                elif xml_format == JUnitXMLDialect.GOOGLE_TEST:
                     google_test_name = (
                         xml_testcase_classname + "." + xml_testcase_name
                     )
@@ -272,7 +307,26 @@ class JUnitXMLReader:
                     test_case_node_title = google_test_name
                     test_case_node_duration = xml_testcase_time
                     test_case_node_test_function = "#GTEST#" + google_test_name
-                elif xml_format == JUnitXMLFormat.PYTEST:
+                elif xml_format == JUnitXMLDialect.CARGO_NEXTEST:
+                    # cargo-nextest records no source location, so the
+                    # classname and name are forwarded as a "#NEXTEST#" marker
+                    # for FileTraceabilityIndex to resolve by forward lookup.
+                    # See the cargo-nextest section of the user guide and
+                    # convert_nextest_test_to_rust_canonical_paths() for the
+                    # JUnit-XML layout and resolution rules.
+                    nextest_full_name = (
+                        xml_testcase_classname + "::" + xml_testcase_name
+                    )
+                    test_case_node_uid = nextest_full_name
+                    test_case_node_title = nextest_full_name
+                    test_case_node_duration = xml_testcase_time
+                    test_case_node_test_function = (
+                        "#NEXTEST#"
+                        + xml_testcase_classname
+                        + "|"
+                        + xml_testcase_name
+                    )
+                elif xml_format == JUnitXMLDialect.PYTEST:
                     xml_testcase_path_parts = xml_testcase_classname
                     xml_testcase_class = ""
                     # Heuristic: if last part of the classname attribute starts with "Test" and is
@@ -368,6 +422,26 @@ class JUnitXMLReader:
                         multiline__=None,
                     ),
                 )
+                for xml_property_ in cls._get_xml_property_list(xml_testcase_):
+                    property_name: str = cls._get_xml_property_attribute(
+                        xml_property_, "name"
+                    )
+                    property_value: str = cls._get_xml_property_attribute(
+                        xml_property_, "value"
+                    )
+                    property_field_name: str = property_field_names[
+                        property_name
+                    ]
+                    testcase_node.set_field_value(
+                        field_name=property_field_name,
+                        form_field_index=0,
+                        value=SDocNodeField(
+                            parent=testcase_node,
+                            field_name=property_field_name,
+                            parts=[property_value],
+                            multiline__=None,
+                        ),
+                    )
                 testcase_node.set_field_value(
                     field_name="TITLE",
                     form_field_index=0,
@@ -410,3 +484,101 @@ class JUnitXMLReader:
                 test_suite_section.section_contents.append(testcase_node)
 
         return document
+
+    @classmethod
+    def _collect_property_field_names(
+        cls: Type["JUnitXMLReader"],
+        xml_testsuite_list: List[bs4.element.Tag],
+    ) -> Dict[str, str]:
+        property_field_names: Dict[str, str] = {}
+        property_names_by_field_name: Dict[str, str] = {}
+
+        for xml_testsuite_ in xml_testsuite_list:
+            xml_testcase_list: List[Any] = xml_testsuite_.find_all(
+                "testcase", recursive=False
+            )
+            for xml_testcase_ in xml_testcase_list:
+                assert isinstance(xml_testcase_, bs4.element.Tag)
+                property_names_for_testcase: Set[str] = set()
+                for xml_property_ in cls._get_xml_property_list(xml_testcase_):
+                    property_name: str = cls._get_xml_property_attribute(
+                        xml_property_, "name"
+                    )
+                    if property_name in property_names_for_testcase:
+                        raise RuntimeError(
+                            "JUnit testcase contains duplicate property name: "
+                            f"{property_name!r}."
+                        )
+                    property_names_for_testcase.add(property_name)
+                    field_name: str = cls._create_sdoc_field_name(property_name)
+                    if not is_uppercase_underscore_string(field_name):
+                        raise RuntimeError(
+                            "JUnit property name cannot be mapped to a "
+                            "StrictDoc field name: "
+                            f"{property_name!r}."
+                        )
+                    if field_name in cls._TEST_RESULT_RESERVED_FIELD_NAMES:
+                        raise RuntimeError(
+                            "JUnit property name maps to a reserved "
+                            "TEST_RESULT field: "
+                            f"{property_name!r} -> {field_name!r}."
+                        )
+                    existing_property_name: Optional[str] = (
+                        property_names_by_field_name.get(field_name)
+                    )
+                    if (
+                        existing_property_name is not None
+                        and existing_property_name != property_name
+                    ):
+                        raise RuntimeError(
+                            "JUnit property names map to the same StrictDoc "
+                            "field: "
+                            f"{existing_property_name!r}, {property_name!r} "
+                            f"-> {field_name!r}."
+                        )
+                    property_names_by_field_name[field_name] = property_name
+                    property_field_names[property_name] = field_name
+
+        return property_field_names
+
+    @staticmethod
+    def _get_xml_property_list(
+        xml_testcase: bs4.element.Tag,
+    ) -> List[bs4.element.Tag]:
+        xml_properties_or_none: Optional[bs4.element.Tag] = (
+            assert_optional_cast(
+                xml_testcase.find("properties", recursive=False),
+                bs4.element.Tag,
+            )
+        )
+        if xml_properties_or_none is None:
+            return []
+        return [
+            assert_cast(xml_property_, bs4.element.Tag)
+            for xml_property_ in xml_properties_or_none.find_all(
+                "property", recursive=False
+            )
+        ]
+
+    @staticmethod
+    def _get_xml_property_attribute(
+        xml_property: bs4.element.Tag, attribute_name: str
+    ) -> str:
+        attribute_value: Any = xml_property.get(attribute_name)
+        if attribute_value is None:
+            raise RuntimeError(
+                "JUnit property is missing required "
+                f"{attribute_name!r} attribute."
+            )
+        if not isinstance(attribute_value, str):
+            raise RuntimeError(
+                "JUnit property attribute must be a string: "
+                f"{attribute_name!r}."
+            )
+        return attribute_value
+
+    @classmethod
+    def _create_sdoc_field_name(
+        cls: Type["JUnitXMLReader"], property_name: str
+    ) -> str:
+        return cls._SAFE_SDOC_FIELD_NAME_REGEX.sub("_", property_name).upper()

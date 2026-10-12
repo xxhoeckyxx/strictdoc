@@ -4,24 +4,12 @@
 
 import os
 import sys
+import time
 from functools import partial
 from typing import Dict, List, Tuple, Union
 
-from strictdoc.backend.markdown.reader import SDMarkdownReader
-from strictdoc.backend.reqif.reqif_reader import ReqIFReader
-from strictdoc.backend.sdoc.grammar_reader import SDocGrammarReader
 from strictdoc.backend.sdoc.models.document import SDocDocument
 from strictdoc.backend.sdoc.models.document_grammar import DocumentGrammar
-from strictdoc.backend.sdoc.reader import SDReader
-from strictdoc.backend.sdoc_source_code.coverage_reports.gcov import (
-    GCovJSONReader,
-)
-from strictdoc.backend.sdoc_source_code.test_reports.junit_xml_reader import (
-    JUnitXMLReader,
-)
-from strictdoc.backend.sdoc_source_code.test_reports.robot_xml_reader import (
-    RobotOutputXMLReader,
-)
 from strictdoc.core.asset_manager import AssetManager
 from strictdoc.core.document_meta import DocumentMeta
 from strictdoc.core.document_tree import DocumentTree
@@ -32,12 +20,50 @@ from strictdoc.core.file_system.file_tree import (
     Folder,
     PathFinder,
 )
+from strictdoc.core.format import Format
 from strictdoc.core.project_config import ProjectConfig
 from strictdoc.helpers.exception import StrictDocException
 from strictdoc.helpers.parallelizer import Parallelizer
 from strictdoc.helpers.paths import SDocRelativePath
 from strictdoc.helpers.textx import drop_textx_meta
-from strictdoc.helpers.timing import measure_performance, timing_decorator
+from strictdoc.helpers.timing import (
+    measure_performance,
+    measure_performance_loop,
+    timing_decorator,
+)
+
+# Each entry: (extension, Format instance, is_grammar).
+# Sorted longest-extension-first so that e.g. ".gra.md" is matched before
+# ".md" (a "foo.gra.md" file ends with both).
+FormatDispatchEntry = Tuple[str, Format, bool]
+
+
+def _build_extension_dispatch_table(
+    project_config: ProjectConfig,
+) -> List[FormatDispatchEntry]:
+    entries: List[FormatDispatchEntry] = []
+    for format_ in project_config.formats:
+        if format_.supports_read():
+            for extension_ in format_.read_extensions():
+                entries.append((extension_, format_, False))
+        if format_.supports_grammar():
+            for extension_ in format_.grammar_extensions():
+                entries.append((extension_, format_, True))
+    entries.sort(key=lambda entry: len(entry[0]), reverse=True)
+    return entries
+
+
+def get_document_extensions(project_config: ProjectConfig) -> List[str]:
+    """
+    All extensions natively read (as documents or grammars) by the
+    project's registered Formats. Used both for DocumentFinder's own file
+    discovery and, in strictdoc/server/document_watcher.py, so a filesystem
+    watcher can't drift out of sync with what DocumentFinder actually reads.
+    """
+    return [
+        extension_
+        for extension_, _, _ in _build_extension_dispatch_table(project_config)
+    ]
 
 
 class DocumentFinder:
@@ -71,67 +97,55 @@ class DocumentFinder:
     def _process_worker_parse_document(
         document_triple: Tuple[Union[Folder, File], File, str],
         project_config: ProjectConfig,
-    ) -> Tuple[File, str, Union[SDocDocument, DocumentGrammar]]:
+    ) -> Tuple[File, str, Union[SDocDocument, DocumentGrammar], float]:
+        """
+        Returns the read document/grammar together with the read's duration
+        instead of printing directly: the caller (running in the main
+        process) reports progress for all documents through a single
+        measure_performance_loop(), which a worker process can't safely
+        share (concurrent in-place progress-line writes from multiple
+        processes would interleave and corrupt the terminal output).
+        """
         _, doc_file, file_tree_mount_folder = document_triple
         doc_full_path = doc_file.full_path
 
-        with measure_performance(
-            f"Reading SDOC: {os.path.basename(doc_full_path)}"
-        ):
-            document_or_grammar: Union[SDocDocument, DocumentGrammar]
+        time_start = time.time()
 
-            # @relation(SDOC-SRS-104, scope=range_start)
-            if doc_full_path.endswith(".sdoc"):
-                sdoc_reader: SDReader = SDReader()
-                document_or_grammar = sdoc_reader.read_from_file(
-                    doc_full_path, project_config
-                )
-                assert isinstance(document_or_grammar, SDocDocument)
-            elif doc_full_path.endswith(".md") or doc_full_path.endswith(
-                ".markdown"
-            ):
-                markdown_reader = SDMarkdownReader()
-                document_or_grammar = markdown_reader.read_from_file(
-                    doc_full_path,
-                    project_config,
-                )
-                assert isinstance(document_or_grammar, SDocDocument)
-            # @relation(SDOC-SRS-104, scope=range_end)
+        document_or_grammar: Union[SDocDocument, DocumentGrammar, None] = None
 
-            elif doc_full_path.endswith(".sgra"):
-                sgra_reader = SDocGrammarReader()
-                document_or_grammar = sgra_reader.read_from_file(
-                    doc_full_path, project_config
+        # @relation(SDOC-SRS-104, scope=range_start)
+        for (
+            extension_,
+            format_,
+            is_grammar_,
+        ) in _build_extension_dispatch_table(project_config):
+            if not doc_full_path.endswith(extension_):
+                continue
+            if is_grammar_:
+                document_or_grammar = format_.read_grammar(
+                    doc_file, project_config
                 )
                 assert isinstance(document_or_grammar, DocumentGrammar)
-            elif doc_full_path.endswith(".reqif"):
-                reqif_reader = ReqIFReader()
-                reqif_documents = reqif_reader.read_from_file(doc_full_path)
-                assert len(reqif_documents) >= 0
-                document_or_grammar = reqif_documents[0]
-                assert isinstance(document_or_grammar, SDocDocument)
-            elif doc_full_path.endswith(".junit.xml"):
-                junit_xml_reader = JUnitXMLReader()
-                document_or_grammar = junit_xml_reader.read_from_file(
-                    doc_file, project_config
-                )
-                assert isinstance(document_or_grammar, SDocDocument)
-            elif doc_full_path.endswith(".gcov.json"):
-                gcov_json_reader = GCovJSONReader()
-                document_or_grammar = gcov_json_reader.read_from_file(
-                    doc_file, project_config
-                )
-                assert isinstance(document_or_grammar, SDocDocument)
-            elif doc_full_path.endswith(".robot.xml"):
-                robot_reader = RobotOutputXMLReader()
-                document_or_grammar = robot_reader.read_from_file(
-                    doc_file, project_config
-                )
             else:
-                raise NotImplementedError
+                document_or_grammar = format_.read_from_file(
+                    doc_file, project_config
+                )
+                assert isinstance(document_or_grammar, SDocDocument)
+            break
+        # @relation(SDOC-SRS-104, scope=range_end)
+
+        if document_or_grammar is None:
+            raise NotImplementedError
         drop_textx_meta(document_or_grammar)
 
-        return doc_file, file_tree_mount_folder, document_or_grammar
+        time_end = time.time()
+
+        return (
+            doc_file,
+            file_tree_mount_folder,
+            document_or_grammar,
+            time_end - time_start,
+        )
 
     @staticmethod
     def _build_document_tree(
@@ -163,12 +177,30 @@ class DocumentFinder:
         )
 
         with measure_performance("Completed parsing all documents"):
-            found_documents = parallelizer.run_parallel(
-                file_tree_list, process_document_binding
-            )
+            with measure_performance_loop(
+                "Reading SDOC", len(file_tree_list)
+            ) as report_progress:
+
+                def on_item_complete(
+                    item_index: int,  # noqa: ARG001
+                    result: Tuple[
+                        File, str, Union[SDocDocument, DocumentGrammar], float
+                    ],
+                ) -> None:
+                    doc_file_ = result[0]
+                    elapsed_time = result[3]
+                    title = os.path.basename(doc_file_.full_path)
+                    with report_progress(title, elapsed_time=elapsed_time):
+                        pass
+
+                found_documents = parallelizer.run_parallel(
+                    file_tree_list,
+                    process_document_binding,
+                    on_item_complete,
+                )
 
         doc_file: File
-        for doc_file, file_tree_mount_folder, document in found_documents:
+        for doc_file, file_tree_mount_folder, document, _ in found_documents:
             assert isinstance(file_tree_mount_folder, str), (
                 file_tree_mount_folder
             )
@@ -213,16 +245,16 @@ class DocumentFinder:
             )
 
             document_meta = DocumentMeta(
-                doc_file.level,
-                file_tree_mount_folder,
-                document_filename,
-                document_filename_base,
-                input_doc_full_path,
-                doc_file.rel_path,
-                doc_relative_path_folder,
-                input_doc_assets_dir_rel_path,
-                output_document_dir_full_path,
-                output_document_dir_rel_path,
+                level=doc_file.level,
+                file_tree_mount_folder=file_tree_mount_folder,
+                document_filename=document_filename,
+                document_filename_base=document_filename_base,
+                input_doc_full_path=input_doc_full_path,
+                input_doc_rel_path=doc_file.rel_path,
+                input_doc_dir_rel_path=doc_relative_path_folder,
+                input_doc_assets_dir_rel_path=input_doc_assets_dir_rel_path,
+                output_document_dir_full_path=output_document_dir_full_path,
+                output_document_dir_rel_path=output_document_dir_rel_path,
             )
             document.assign_meta(document_meta)
 
@@ -307,16 +339,7 @@ class DocumentFinder:
                 file_tree_structure = FileFinder.find_files_with_extensions(
                     root_path=path_to_doc_root,
                     ignored_dirs=[project_config.output_dir],
-                    extensions=[
-                        ".sdoc",
-                        ".md",
-                        ".markdown",
-                        ".sgra",
-                        ".reqif",
-                        ".junit.xml",
-                        ".gcov.json",
-                        ".robot.xml",
-                    ],
+                    extensions=get_document_extensions(project_config),
                     include_paths=project_config.include_doc_paths,
                     exclude_paths=project_config.exclude_doc_paths,
                 )

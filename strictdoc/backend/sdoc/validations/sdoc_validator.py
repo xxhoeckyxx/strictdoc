@@ -86,6 +86,36 @@ class SDocValidator:
                     path_to_grammar,
                 )
 
+        if (
+            grammar_element.tag == "TEXT"
+            and grammar_element.property_is_composite
+        ):
+            raise StrictDocSemanticError.text_element_must_not_be_composite(
+                grammar_element,
+                path_to_grammar,
+            )
+
+        if (
+            grammar_element.tag == "SECTION"
+            and grammar_element.property_is_composite is not True
+        ):
+            raise StrictDocSemanticError.section_element_must_be_composite(
+                grammar_element,
+                path_to_grammar,
+            )
+
+        for relation_ in grammar_element.relations:
+            if (
+                relation_.reverse_relation_role is not None
+                and relation_.relation_role is None
+            ):
+                raise StrictDocSemanticError.grammar_relation_reverse_role_without_role(
+                    grammar_element=grammar_element,
+                    relation_type=relation_.relation_type,
+                    reverse_relation_role=relation_.reverse_relation_role,
+                    path_to_sdoc_file=path_to_grammar,
+                )
+
     @staticmethod
     def _validate_document_config(document: SDocDocument) -> None:
         document_config: DocumentConfig = document.config
@@ -195,8 +225,8 @@ class SDocValidator:
             try:
                 valid_or_not_required_field = (
                     SDocValidator.validate_requirement_field(
-                        requirement,
-                        document_grammar,
+                        requirement=requirement,
+                        document_grammar=document_grammar,
                         requirement_field=requirement_field,
                         grammar_field=grammar_field,
                         path_to_sdoc_file=path_to_sdoc_file,
@@ -242,6 +272,7 @@ class SDocValidator:
 
     @staticmethod
     def validate_requirement_field(
+        *,
         requirement: SDocNode,
         document_grammar: DocumentGrammar,
         requirement_field: Optional[SDocNodeField],
@@ -312,7 +343,10 @@ class SDocValidator:
                     document_grammar=document_grammar,
                     path_to_sdoc_file=path_to_sdoc_file,
                 )
-            if requirement_field_text_value not in grammar_field.options:
+            if (
+                requirement_field_text_value not in grammar_field.options
+                and requirement_field_text_value not in ("TBD", "TBC")
+            ):
                 raise StrictDocSemanticError.invalid_choice_field(
                     node=requirement,
                     document_grammar=document_grammar,
@@ -338,7 +372,10 @@ class SDocValidator:
                 requirement_field_text_value.split(", ")
             )
             for component in requirement_field_value_components:
-                if component not in grammar_field.options:
+                if component not in grammar_field.options and component not in (
+                    "TBD",
+                    "TBC",
+                ):
                     raise StrictDocSemanticError.invalid_multiple_choice_field(
                         node=requirement,
                         document_grammar=document_grammar,

@@ -2,6 +2,7 @@
 @relation(SDOC-SRS-126, scope=file)
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -16,6 +17,7 @@ from starlette.responses import Response
 from strictdoc import __version__
 from strictdoc.core.project_config import ProjectConfig
 from strictdoc.helpers.coverage import register_code_coverage_hook
+from strictdoc.helpers.deprecation_engine import DEPRECATION_ENGINE
 from strictdoc.helpers.pickle import pickle_load
 from strictdoc.server.config import SDocServerEnvVariable
 from strictdoc.server.helpers.hierarchical_rw_lock_manager import (
@@ -46,7 +48,7 @@ def print_welcome_message(project_config: ProjectConfig) -> None:
     url = f"{host}:{project_config.server_port}"
 
     width = 72
-    border = "═" * width
+    border = "=" * width
 
     lines = [
         f" {strictdoc_version.center(width - 2)} ",
@@ -55,24 +57,35 @@ def print_welcome_message(project_config: ProjectConfig) -> None:
         "",
         " Documentation: https://strictdoc.readthedocs.io/",
         "",
+        " Subscribe to the StrictDoc mailing list for news about features,",
+        " breaking changes, and other updates:",
+        " https://groups.io/g/strictdoc",
+        "",
         " Share feedback or report issues:",
         " https://github.com/strictdoc-project/strictdoc/issues",
     ]
 
     banner = (
         "\n\n"
-        f"╔{border}╗\n"
-        + "\n".join(f"║{line.ljust(width)}║" for line in lines)
-        + f"\n╚{border}╝\n"
+        f"+{border}+\n"
+        + "\n".join(f"|{line.ljust(width)}|" for line in lines)
+        + f"\n+{border}+\n"
     )
 
     LOGGER.info(banner)
 
 
 def create_app(*, project_config: ProjectConfig) -> FastAPI:
-    def lifespan(_: FastAPI) -> Generator[None, None, None]:
+    def lifespan(app_: FastAPI) -> Generator[None, None, None]:
+        DEPRECATION_ENGINE.print_all_messages()
         print_welcome_message(project_config)
+        app_.state.event_loop = asyncio.get_event_loop()
+        document_watcher = getattr(app_.state, "document_watcher", None)
+        if document_watcher is not None:
+            document_watcher.start()
         yield
+        if document_watcher is not None:
+            document_watcher.stop()
 
     app = FastAPI(lifespan=lifespan)
 
@@ -119,6 +132,7 @@ def create_app(*, project_config: ProjectConfig) -> FastAPI:
     app.include_router(
         create_main_router(
             project_config=project_config,
+            app=app,
             lock_manager=lock_manager,
         )
     )

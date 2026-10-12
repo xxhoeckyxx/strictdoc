@@ -2,7 +2,15 @@ import pytest
 
 from strictdoc.backend.markdown.reader import SDMarkdownReader
 from strictdoc.backend.sdoc.error_handling import StrictDocSemanticError
+from strictdoc.backend.sdoc.models.anchor import Anchor
+from strictdoc.backend.sdoc.models.document_grammar import DocumentGrammar
+from strictdoc.backend.sdoc.models.grammar_element import (
+    GrammarElement,
+    GrammarElementFieldString,
+)
+from strictdoc.backend.sdoc.models.inline_link import InlineLink
 from strictdoc.backend.sdoc.models.node import SDocNode
+from strictdoc.backend.sdoc.validations.sdoc_validator import SDocValidator
 
 
 def test_001_markdown_reader_requires_h1_heading_first():
@@ -116,7 +124,6 @@ def test_008_markdown_reader_raises_error_on_missing_relation_type_key():
 ## Requirement
 
 **UID**: REQ-1
-
 **Relations**:
 - **ID**: `REQ-0`
 
@@ -136,7 +143,6 @@ def test_009_markdown_reader_raises_error_on_unknown_relation_type():
 ## Requirement
 
 **UID**: REQ-1
-
 **Relations**:
 - **Type**: `Unknown` \\
   **ID**: `REQ-0`
@@ -157,7 +163,6 @@ def test_010_markdown_reader_raises_error_on_missing_id_key():
 ## Requirement
 
 **UID**: REQ-1
-
 **Relations**:
 - **Type**: `Parent`
 
@@ -177,7 +182,6 @@ def test_011_markdown_reader_raises_error_on_unknown_key_in_relation():
 ## Requirement
 
 **UID**: REQ-1
-
 **Relations**:
 - **Type**: `Parent` \\
   **ID**: `REQ-0` \\
@@ -200,7 +204,7 @@ def test_012_markdown_reader_preserves_multiline_crlf_field_value():
         "\r\n"
         "**UID**: REQ-1\r\n"
         "\r\n"
-        "**Statement**:\r\n"
+        "**STATEMENT**:\r\n"
         "\r\n"
         "Line 1\r\n"
         "Line 2\r\n"
@@ -235,3 +239,767 @@ System shall do X.
     assert requirement.node_type == "REQUIREMENT"
     assert requirement.reserved_statement is not None
     assert "**BAD.NAME**: value" in requirement.reserved_statement
+
+
+def test_014_rejects_blank_line_between_meta_and_relations():
+    input_markdown = """\
+# Document title
+
+## Requirement
+
+**UID**: REQ-3
+
+**Relations**:
+- **Type**: `Parent` \\
+  **ID**: `REQ-1`
+- **Type**: `Child` \\
+  **ID**: `REQ-4` \\
+  **Role**: `Refines`
+
+Requirement shall do B.
+"""
+
+    reader = SDMarkdownReader()
+    with pytest.raises(StrictDocSemanticError) as exc_info:
+        reader.read(input_markdown, file_path=None)
+    assert "Relations must directly follow" in exc_info.value.title
+
+
+def test_015_document_level_prefix_sets_requirement_prefix():
+    markdown_content = """\
+# Requirements specification
+
+**Prefix**: MYDOC-
+
+## Requirement
+
+**UID**: MYDOC-001
+
+System shall do B.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    assert document.config.requirement_prefix == "MYDOC-"
+
+
+def test_016_link_tag_in_statement_creates_inline_link_part():
+    markdown_content = """\
+# Document
+
+## Requirement A
+
+**UID**: REQ-1
+
+System shall do X. See also [LINK: REQ-2].
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    requirement = document.section_contents[0]
+    assert isinstance(requirement, SDocNode)
+    stmt_field = requirement.ordered_fields_lookup["STATEMENT"][0]
+    inline_link_parts = [
+        p for p in stmt_field.parts if isinstance(p, InlineLink)
+    ]
+    assert len(inline_link_parts) == 1
+    assert inline_link_parts[0].link == "REQ-2"
+    assert inline_link_parts[0].parent is stmt_field
+    assert stmt_field.parent is requirement
+
+
+def test_017_anchor_tag_in_statement_creates_anchor_part():
+    markdown_content = """\
+# Document
+
+## Section
+
+[ANCHOR: SEC-INTRO]
+This section describes the introduction.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    text_node = section.section_contents[0]
+    assert isinstance(text_node, SDocNode)
+    stmt_field = text_node.ordered_fields_lookup["STATEMENT"][0]
+    anchor_parts = [p for p in stmt_field.parts if isinstance(p, Anchor)]
+    assert len(anchor_parts) == 1
+    assert anchor_parts[0].value == "SEC-INTRO"
+    assert anchor_parts[0].parent is stmt_field
+    assert stmt_field.parent is text_node
+
+
+def test_018_anchor_tag_with_title_creates_anchor_with_title():
+    markdown_content = """\
+# Document
+
+## Section
+
+[ANCHOR: SEC-INTRO, Introduction]
+This section describes the introduction.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    section = document.section_contents[0]
+    text_node = section.section_contents[0]
+    stmt_field = text_node.ordered_fields_lookup["STATEMENT"][0]
+    anchor_parts = [p for p in stmt_field.parts if isinstance(p, Anchor)]
+    assert len(anchor_parts) == 1
+    assert anchor_parts[0].value == "SEC-INTRO"
+    assert anchor_parts[0].title == "Introduction"
+    assert anchor_parts[0].has_title is True
+
+
+def test_019_link_tag_in_requirement_statement_wires_parent_correctly():
+    markdown_content = """\
+# Document
+
+## Requirement
+
+**UID**: REQ-1
+
+Statement with [LINK: SOME-ANCHOR] inline.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    requirement = document.section_contents[0]
+    stmt_field = requirement.ordered_fields_lookup["STATEMENT"][0]
+    inline_links = [p for p in stmt_field.parts if isinstance(p, InlineLink)]
+    assert len(inline_links) == 1
+    link = inline_links[0]
+    assert link.link == "SOME-ANCHOR"
+    # parent chain: InlineLink -> SDocNodeField -> SDocNode
+    assert link.parent is stmt_field
+    assert link.parent_node() is requirement
+
+
+def test_020_link_tag_inside_inline_code_span_is_not_parsed():
+    # [LINK: ...] inside backtick code spans must be treated as plain text,
+    # not as InlineLink objects (the referenced UID may not exist).
+    markdown_content = """\
+# Document
+
+## Requirement
+
+**UID**: MD-1
+
+A `[LINK: NONEXISTENT]` token is written like this.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    requirement = document.section_contents[0]
+    assert isinstance(requirement, SDocNode)
+    stmt_field = requirement.ordered_fields_lookup["STATEMENT"][0]
+    inline_links = [p for p in stmt_field.parts if isinstance(p, InlineLink)]
+    assert len(inline_links) == 0
+    full_text = "".join(
+        p if isinstance(p, str) else "" for p in stmt_field.parts
+    )
+    assert "[LINK: NONEXISTENT]" in full_text
+
+
+def test_021_link_tag_inside_fenced_code_block_is_not_parsed():
+    # [LINK: ...] inside a fenced code block must not become an InlineLink.
+    markdown_content = """\
+# Document
+
+## Requirement
+
+**UID**: MD-1
+
+Example usage:
+
+```markdown
+See also [LINK: NONEXISTENT].
+```
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    requirement = document.section_contents[0]
+    assert isinstance(requirement, SDocNode)
+    stmt_field = requirement.ordered_fields_lookup["STATEMENT"][0]
+    inline_links = [p for p in stmt_field.parts if isinstance(p, InlineLink)]
+    assert len(inline_links) == 0
+
+
+def test_022_link_tag_outside_code_is_still_parsed_when_code_also_present():
+    # [LINK: REAL] outside a code fence must still become an InlineLink even
+    # when there is also a [LINK: FAKE] inside a fenced code block.
+    markdown_content = """\
+# Document
+
+## Requirement
+
+**UID**: MD-1
+
+See [LINK: REAL-1] for details.
+
+```markdown
+Do NOT parse [LINK: FAKE].
+```
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    requirement = document.section_contents[0]
+    assert isinstance(requirement, SDocNode)
+    stmt_field = requirement.ordered_fields_lookup["STATEMENT"][0]
+    inline_links = [p for p in stmt_field.parts if isinstance(p, InlineLink)]
+    assert len(inline_links) == 1
+    assert inline_links[0].link == "REAL-1"
+
+
+def test_023_anchor_tag_inside_inline_code_span_is_not_parsed():
+    # [ANCHOR: ...] inside a backtick span must not become an Anchor object.
+    markdown_content = """\
+# Document
+
+## Section
+
+Use `[ANCHOR: FAKE-ANCHOR]` to place an anchor.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    text_node = section.section_contents[0]
+    stmt_field = text_node.ordered_fields_lookup["STATEMENT"][0]
+    anchors = [p for p in stmt_field.parts if isinstance(p, Anchor)]
+    assert len(anchors) == 0
+
+
+def test_016_section_level_prefix_is_stored_on_section_node():
+    markdown_content = """\
+# Requirements specification
+
+## Chapter 2
+
+**TYPE**: SECTION \\
+**PREFIX**: LEVEL2-REQ-
+
+### Requirement
+
+**UID**: LEVEL2-REQ-001
+
+System shall do B.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert section.get_prefix() == "LEVEL2-REQ-"
+
+
+def test_017_section_immediately_followed_by_child_section_has_no_empty_text_node():
+    # Regression: a blank line between a section heading and its first child
+    # heading was captured as the section body ("\n"), which passed the
+    # `len > 0` guard and produced a spurious empty TEXT node.
+    markdown_content = """\
+# Document title
+
+## Parent section
+
+### Child section
+
+**MID**: aabbccdd11223344aabbccdd11223344 \\
+**UID**: REQ-1
+
+**STATEMENT**: Some statement.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    parent_section = document.section_contents[0]
+    assert isinstance(parent_section, SDocNode)
+    assert parent_section.node_type == "SECTION"
+    # Must contain only the child requirement, no spurious empty TEXT node.
+    assert len(parent_section.section_contents) == 1
+    child = parent_section.section_contents[0]
+    assert isinstance(child, SDocNode)
+    assert child.node_type == "REQUIREMENT"
+
+
+def test_024_markdown_reader_registers_document_config():
+    markdown_content = """\
+# Document title
+
+**UID**: DOC-1 \\
+**Version**: Git commit: @GIT_VERSION, Git branch: @GIT_BRANCH \\
+**Date**: @GIT_COMMIT_DATETIME \\
+**Classification**: Confidential
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    assert document.config.uid == "DOC-1"
+    assert (
+        document.config.version
+        == "Git commit: @GIT_VERSION, Git branch: @GIT_BRANCH"
+    )
+    assert document.config.date == "@GIT_COMMIT_DATETIME"
+    assert document.config.classification == "Confidential"
+    assert document.config.get_custom_metadata() == []
+
+
+def test_026_markdown_reader_registers_document_metadata():
+    markdown_content = """\
+# Document title
+
+**Author**: Jane \\
+**Checked-by**: Chuck Norris
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    assert document.config.get_custom_metadata() == [
+        ("Author", "Jane"),
+        ("Checked-by", "Chuck Norris"),
+    ]
+
+
+def test_025_markdown_reader_empty_heading_produces_no_title_field():
+    markdown_content = """\
+# Document title
+
+##
+
+**Type**: REQUIREMENT \\
+**UID**: REQ-1
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    requirement = document.section_contents[0]
+    assert isinstance(requirement, SDocNode)
+    assert requirement.node_type == "REQUIREMENT"
+    assert requirement.reserved_uid == "REQ-1"
+    assert requirement.reserved_title is None
+    assert "TITLE" not in requirement.ordered_fields_lookup
+
+
+def test_027_section_level_fields():
+    markdown_content = """\
+# Document title
+
+## Chapter 2
+
+**Type**: SECTION \\
+**MID**: aabbccdd11223344aabbccdd11223344 \\
+**UID**: SEC-1 \\
+**PREFIX**: LEVEL2-REQ-
+
+Some prose.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert section.reserved_uid == "SEC-1"
+    assert str(section.reserved_mid) == "aabbccdd11223344aabbccdd11223344"
+    assert section.get_prefix() == "LEVEL2-REQ-"
+    assert list(section.ordered_fields_lookup.keys()) == [
+        "MID",
+        "UID",
+        "PREFIX",
+        "TITLE",
+    ]
+
+
+def test_028_section_level_uid_without_explicit_type_has_no_duplicated_prose():
+    markdown_content = """\
+# Document title
+
+## Chapter 2
+
+**UID**: SEC-1
+
+### Notes
+
+Some prose.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert section.reserved_uid == "SEC-1"
+    assert [c.node_type for c in section.section_contents] == ["SECTION"]
+
+
+def test_029_markdown_reader_supports_headings_deeper_than_h6():
+    markdown_content = """\
+# Document title
+
+## Level 1
+
+### Level 2
+
+#### Level 3
+
+##### Level 4
+
+###### Level 5
+
+####### Level 6
+
+######## Deep requirement
+
+**UID**: REQ-DEEP-1
+
+**Statement**: Statement nested seven levels below the document.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    node = document.section_contents[0]
+    for expected_title in [
+        "Level 1",
+        "Level 2",
+        "Level 3",
+        "Level 4",
+        "Level 5",
+        "Level 6",
+    ]:
+        assert isinstance(node, SDocNode)
+        assert node.node_type == "SECTION"
+        assert node.reserved_title == expected_title
+        assert len(node.section_contents) == 1
+        node = node.section_contents[0]
+
+    assert isinstance(node, SDocNode)
+    assert node.node_type == "REQUIREMENT"
+    assert node.reserved_uid == "REQ-DEEP-1"
+
+
+def test_030_markdown_reader_hashes_without_space_are_not_a_heading():
+    # CommonMark requires a space after the hashes; this must stay true for
+    # the extended 7+ hash headings as well.
+    markdown_content = """\
+# Document title
+
+## Section
+
+#######Not a heading.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert len(section.section_contents) == 1
+    text_node = section.section_contents[0]
+    assert isinstance(text_node, SDocNode)
+    assert text_node.node_type == "TEXT"
+    assert text_node.reserved_statement is not None
+    assert "#######Not a heading." in text_node.reserved_statement
+
+
+def test_032_markdown_reader_rejects_flat_requirement_blocks_without_section_marker():
+    # A generator (e.g. an Excel importer) may emit multiple
+    # Type/UID/statement blocks flatly under one heading instead of giving
+    # each requirement its own subheading (SDOC-MD-35). Without an explicit
+    # **Type**: SECTION on the heading, this is always rejected, with a hint
+    # to add that marker: see
+    # test_035_markdown_reader_explicit_section_type_resolves_multiple_flat_records
+    # for the accepted form of this same document.
+    markdown_content = """\
+# 0_MISSION Requirements
+
+**Grammar**: @software_md
+
+<!-- Generated by excel_import/SYS/import.py. Do not edit manually. -->
+
+## system_section_1
+
+**Type**: REQUIREMENT \\
+**UID**: SYS-REQ-0001
+
+s_text_1
+
+**Type**: REQUIREMENT \\
+**UID**: SYS-REQ-0002
+
+s_text_2
+
+## system_section_2
+
+**Type**: REQUIREMENT \\
+**UID**: SYS-REQ-0003
+
+s_text_3
+
+## Unsectioned requirements
+
+**Type**: REQUIREMENT \\
+**UID**: MIS-REQ-001
+"""
+
+    reader = SDMarkdownReader()
+    with pytest.raises(StrictDocSemanticError) as exc_info:
+        reader.read(markdown_content, file_path=None)
+    assert "**Type**: SECTION" in exc_info.value.title
+    assert "**Type**: SECTION" in str(exc_info.value.hint)
+
+
+def test_033_markdown_reader_rejects_single_record_with_own_title_without_section_marker():
+    # A single flat record (no second **Type**: boundary) that carries its
+    # own explicit **Title**: field is rejected the same way as multiple
+    # flat records (SDOC-MD-35): it is unclear whether the heading text is
+    # the record's title (conflicting with the record's own **Title**:) or a
+    # plain container label, so the heading must declare **Type**: SECTION
+    # explicitly, same as for two-or-more records.
+    markdown_content = """\
+# Document title
+
+## Unsectioned requirements
+
+**Type**: REQUIREMENT \\
+**UID**: RFLX-RWH-ARO-011 \\
+**Title**: Reliability
+
+No single point failure shall lead to the loss of the equipment/instrument.
+"""
+
+    reader = SDMarkdownReader()
+    with pytest.raises(StrictDocSemanticError) as exc_info:
+        reader.read(markdown_content, file_path=None)
+    assert "**Type**: SECTION" in exc_info.value.title
+    assert "**Type**: SECTION" in str(exc_info.value.hint)
+
+
+def test_035_markdown_reader_explicit_section_type_resolves_multiple_flat_records():
+    # Adding **Type**: SECTION to "system_section_1", as recommended by the
+    # error in test_032, resolves it: the heading becomes an explicit
+    # container and its flat records become untitled REQUIREMENT children
+    # (SDOC-MD-35). The other two headings need no marker: each holds
+    # exactly one flat record with no **Title**: field of its own, so the
+    # heading text unambiguously becomes that record's title, unaffected by
+    # SDOC-MD-35.
+    markdown_content = """\
+# 0_MISSION Requirements
+
+<!-- Generated by excel_import/SYS/import.py. Do not edit manually. -->
+
+## system_section_1
+
+**Type**: SECTION
+
+**Type**: REQUIREMENT \\
+**UID**: SYS-REQ-0001
+
+s_text_1
+
+**Type**: REQUIREMENT \\
+**UID**: SYS-REQ-0002
+
+s_text_2
+
+## system_section_2
+
+**Type**: REQUIREMENT \\
+**UID**: SYS-REQ-0003
+
+s_text_3
+
+## Unsectioned requirements
+
+**Type**: REQUIREMENT \\
+**UID**: MIS-REQ-001
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    assert [c.node_type for c in document.section_contents] == [
+        "TEXT",
+        "SECTION",
+        "REQUIREMENT",
+        "REQUIREMENT",
+    ]
+
+    system_section_1 = document.section_contents[1]
+    assert isinstance(system_section_1, SDocNode)
+    assert system_section_1.reserved_title == "system_section_1"
+    assert [c.node_type for c in system_section_1.section_contents] == [
+        "REQUIREMENT",
+        "REQUIREMENT",
+    ]
+
+    sys_req_1, sys_req_2 = system_section_1.section_contents
+    assert isinstance(sys_req_1, SDocNode)
+    assert isinstance(sys_req_2, SDocNode)
+    assert sys_req_1.reserved_title is None
+    assert sys_req_1.reserved_uid == "SYS-REQ-0001"
+    assert sys_req_2.reserved_title is None
+    assert sys_req_2.reserved_uid == "SYS-REQ-0002"
+
+    system_section_2 = document.section_contents[2]
+    assert isinstance(system_section_2, SDocNode)
+    assert system_section_2.node_type == "REQUIREMENT"
+    assert system_section_2.reserved_title == "system_section_2"
+    assert system_section_2.reserved_uid == "SYS-REQ-0003"
+
+    unsectioned_requirement = document.section_contents[3]
+    assert isinstance(unsectioned_requirement, SDocNode)
+    assert unsectioned_requirement.reserved_title == "Unsectioned requirements"
+    assert unsectioned_requirement.reserved_uid == "MIS-REQ-001"
+
+
+def test_034_markdown_reader_explicit_section_type_resolves_single_record_ambiguity():
+    # Adding **Type**: SECTION to the heading, as recommended by the error in
+    # test_033, resolves the ambiguity: the heading becomes an explicit
+    # container and the flat record below becomes its child, keeping its own
+    # title (SDOC-MD-35).
+    markdown_content = """\
+# Document title
+
+## Unsectioned requirements
+
+**Type**: SECTION
+
+**Type**: REQUIREMENT \\
+**UID**: RFLX-RWH-ARO-011 \\
+**Title**: Reliability
+
+No single point failure shall lead to the loss of the equipment/instrument.
+"""
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path=None)
+
+    section = document.section_contents[0]
+    assert isinstance(section, SDocNode)
+    assert section.node_type == "SECTION"
+    assert section.reserved_title == "Unsectioned requirements"
+    assert section.reserved_uid is None
+    assert len(section.section_contents) == 1
+
+    requirement = section.section_contents[0]
+    assert isinstance(requirement, SDocNode)
+    assert requirement.node_type == "REQUIREMENT"
+    assert requirement.reserved_title == "Reliability"
+    assert requirement.reserved_uid == "RFLX-RWH-ARO-011"
+
+
+def test_031_markdown_reader_rejects_forward_jump_beyond_h6():
+    # Forward-jump validation must keep working in the extended range.
+    markdown_content = """\
+# Document title
+
+## Level 1
+
+### Level 2
+
+#### Level 3
+
+##### Level 4
+
+###### Level 5
+
+######## Level 7 reached by a forward jump
+"""
+
+    reader = SDMarkdownReader()
+    with pytest.raises(StrictDocSemanticError) as exc_info:
+        reader.read(markdown_content, file_path=None)
+    assert "forward jumps" in str(exc_info.value.title)
+
+
+def test_036_markdown_reader_unregistered_field_error_reports_correct_location():
+    # Regression test: a semantic error raised against a Markdown-derived
+    # node used to always report "Location: file:None:None" because
+    # SDMarkdownReader never populated SDocNode.ng_line_start/ng_col_start
+    # (unlike the SDoc/textX backend, which sets them via ParserFromTextX).
+    markdown_content = """\
+# Document title
+
+Some intro text.
+
+## Section with a stray UID
+
+**Type**: SECTION \\
+**UID**: SECTION-1
+
+Section body text.
+"""
+    section_heading_line = 5
+
+    reader = SDMarkdownReader()
+    document = reader.read(markdown_content, file_path="test.md")
+
+    section_node = document.section_contents[1]
+    assert isinstance(section_node, SDocNode)
+    assert section_node.node_type == "SECTION"
+    assert "UID" in section_node.ordered_fields_lookup
+
+    # A custom grammar (as in the reported bug) whose SECTION element only
+    # declares MID and TITLE, i.e., it does not register UID.
+    custom_section_element = GrammarElement(
+        parent=None,
+        tag="SECTION",
+        property_is_composite="True",
+        property_prefix="",
+        property_view_style="",
+        fields=[
+            GrammarElementFieldString(
+                parent=None, title="MID", human_title=None, required="False"
+            ),
+            GrammarElementFieldString(
+                parent=None, title="TITLE", human_title=None, required="True"
+            ),
+        ],
+        relations=[],
+    )
+    custom_grammar = DocumentGrammar(
+        parent=None, elements=[custom_section_element], import_from_file=None
+    )
+
+    with pytest.raises(StrictDocSemanticError) as exc_info:
+        SDocValidator.validate_node(
+            section_node,
+            custom_grammar,
+            path_to_sdoc_file="test.md",
+        )
+
+    error = exc_info.value
+    assert "UID" in error.title
+    assert error.file_path == "test.md"
+    assert error.line == section_heading_line
+    assert error.col is not None
+    assert (
+        f"Location: test.md:{section_heading_line}:{error.col}"
+        in error.to_print_message()
+    )

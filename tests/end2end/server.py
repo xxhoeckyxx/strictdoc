@@ -245,20 +245,32 @@ class SDocTestServer:
             # process is being terminated.
             #
             self.process.send_signal(signal.SIGTERM)
-            self.process.wait(timeout=1)
+            try:
+                self.process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                # The server process may not exit within 1 second, e.g. when
+                # running with code coverage which does extra work (flushing
+                # coverage data) on SIGTERM. It is still given a chance to
+                # exit gracefully below, together with the child processes.
+                pass
             self.process.terminate()
 
             for process_ in child_processes:
-                if process_.is_running():
-                    process_.send_signal(signal.SIGTERM)
+                try:
+                    if process_.is_running():
+                        process_.send_signal(signal.SIGTERM)
+                except psutil.NoSuchProcess:
+                    continue
 
             #
-            # Wait for all processes to exit gracefully.
+            # Wait for all processes (main server + children) to exit
+            # gracefully.
             #
+            all_processes = [parent, *child_processes]
             start_time = time.monotonic()
             timeout = 5
             while True:
-                alive = [p for p in child_processes if p.is_running()]
+                alive = [p for p in all_processes if p.is_running()]
                 if len(alive) == 0:
                     print(  # noqa: T201
                         "SDocTestServer: "
@@ -271,11 +283,11 @@ class SDocTestServer:
                 if (time.monotonic() - start_time) > timeout:
                     print(  # noqa: T201
                         "SDocTestServer: "
-                        "Timeout reached. Some StrictDoc server child processes "
+                        "Timeout reached. Some StrictDoc server processes "
                         "did not terminate: "
                         f"{alive}."
                     )
-                    for process in child_processes:
+                    for process in all_processes:
                         try:
                             if process.is_running():
                                 process.kill()
@@ -343,6 +355,7 @@ class SDocTestServer:
         # server command, otherwise the Python packages will not be discovered.
         strictdoc_env: Dict[str, str] = dict(os.environ)
         strictdoc_env["PYTHONPATH"] = os.getcwd()
+        strictdoc_env["STRICTDOC_ENV"] = "test"
 
         should_collect_coverage = test_environment.coverage
         strictdoc_args: List[str] = [sys.executable]

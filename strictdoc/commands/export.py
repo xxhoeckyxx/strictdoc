@@ -1,12 +1,17 @@
 import argparse
-from typing import List
+import os
+import sys
+from typing import List, Optional
 
 from strictdoc.backend.reqif.sdoc_reqif_fields import ReqIFProfile
 from strictdoc.cli.base_command import BaseCommand, CLIValidationError
-from strictdoc.commands._shared import _check_reqif_profile
+from strictdoc.commands._shared import (
+    _check_reqif_profile,
+    _SilentArgumentParser,
+)
 from strictdoc.commands.export_config import ExportCommandConfig
-from strictdoc.core.actions.export_action import ExportAction
 from strictdoc.core.project_config import ProjectConfigLoader
+from strictdoc.features.export.export_action import ExportAction
 from strictdoc.helpers.parallelizer import Parallelizer
 
 EXPORT_FORMATS = [
@@ -24,12 +29,84 @@ EXPORT_FORMATS = [
 ]
 
 
+def _preparse_config_path() -> Optional[str]:
+    """
+    Best-effort pre-parse of sys.argv to discover the project config path
+    before the real argparse parse happens.
+
+    This is needed because --formats is validated by an argparse `type=`
+    callback, which runs during parsing -- before ExportCommand.run() loads
+    the project config -- while custom Format handles registered in that
+    same config are only known once it is loaded. Mirroring
+    ExportCommand's own argument shape (rather than manually scanning
+    sys.argv token by token) ensures option values aren't misread as
+    positional input paths.
+    """
+    try:
+        export_index = next(
+            i
+            for i, token in enumerate(sys.argv[1:], start=1)
+            if token == "export"
+        )
+    except StopIteration:
+        return None
+
+    pre_parser = _SilentArgumentParser(add_help=False)
+    ExportCommand.add_arguments(pre_parser, validate_formats=False)
+    try:
+        pre_args, _ = pre_parser.parse_known_args(sys.argv[export_index + 1 :])
+    except (SystemExit, argparse.ArgumentError):
+        return None
+
+    if pre_args.config is not None:
+        return str(pre_args.config)
+    if pre_args.input_paths:
+        input_path = str(pre_args.input_paths[0])
+        return (
+            os.path.dirname(input_path)
+            if os.path.isfile(input_path)
+            else input_path
+        )
+    return None
+
+
+def _get_allowed_format_handles() -> List[str]:
+    # Preserve the exact built-in order (used verbatim in the CLI's error
+    # message), then append any custom Format handles registered by the
+    # project config, if one can be found and loaded at this point.
+    allowed_handles = list(EXPORT_FORMATS)
+
+    config_path = _preparse_config_path()
+    if config_path is None:
+        return allowed_handles
+
+    try:
+        project_config = ProjectConfigLoader.load_from_path_or_get_default(
+            path_to_config=config_path
+        )
+    except Exception:
+        # A broken config surfaces properly later, when
+        # ExportCommand.run() loads it for real.
+        return allowed_handles
+
+    for format_ in project_config.formats:
+        for handle_ in format_.handles():
+            if handle_ not in allowed_handles:
+                allowed_handles.append(handle_)
+    return allowed_handles
+
+
+def _split_formats(formats: str) -> List[str]:
+    return formats.split(",")
+
+
 def _check_formats(formats: str) -> List[str]:
-    formats_array = formats.split(",")
+    formats_array = _split_formats(formats)
+    allowed_handles = _get_allowed_format_handles()
     for fmt in formats_array:
-        if fmt in EXPORT_FORMATS:
+        if fmt in allowed_handles:
             continue
-        export_formats = ", ".join(map(lambda f: f"'{f}'", EXPORT_FORMATS))
+        export_formats = ", ".join(map(lambda f: f"'{f}'", allowed_handles))
         message = f"invalid choice: '{fmt}' (choose from {export_formats})"
         raise argparse.ArgumentTypeError(message)
     return formats_array
@@ -56,7 +133,9 @@ class ExportCommand(BaseCommand):
     DETAILED_HELP = HELP
 
     @classmethod
-    def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
+    def add_arguments(
+        cls, parser: argparse.ArgumentParser, *, validate_formats: bool = True
+    ) -> None:
         command_parser_export = parser
         command_parser_export.add_argument(
             "input_paths",
@@ -72,7 +151,7 @@ class ExportCommand(BaseCommand):
         )
         command_parser_export.add_argument(
             "--formats",
-            type=_check_formats,
+            type=_check_formats if validate_formats else _split_formats,
             default=["html"],
             help="Export formats",
         )
@@ -175,6 +254,22 @@ class ExportCommand(BaseCommand):
             help="Path to pre installed chromedriver for html2pdf. "
             "If not given, chromedriver is downloaded and saved to "
             "strictdoc cache.",
+        )
+        command_parser_export.add_argument(
+            "--chrome-binary",
+            type=str,
+            help="Path to a Chrome/Chromium binary for html2pdf. "
+            "If not given, html2pdf attempts to detect an existing "
+            "Chrome installation.",
+        )
+        command_parser_export.add_argument(
+            "--disable-ssl-check",
+            action="store_true",
+            default=False,
+            help=(
+                "Disable SSL certificate verification for HTML2PDF's "
+                "HTTP downloads."
+            ),
         )
         command_parser_export.add_argument(
             "--config",

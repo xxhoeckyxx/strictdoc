@@ -1,6 +1,6 @@
 REQUIRES: PLATFORM_IS_NOT_WINDOWS
 
-RUN: cd "%strictdoc_root/" && %strictdoc export "%strictdoc_root/" --output-dir="%T"
+RUN: cd "%strictdoc_root/" && %strictdoc --debug export "%strictdoc_root/" --output-dir="%T"
 
 RUN: %check_exists --file "%T/html/index.html"
 RUN: %check_exists --file %T/html/strictdoc/docs/strictdoc_01_user_guide.html
@@ -37,11 +37,6 @@ RUN: %check_exists --file %T/html/strictdoc/docs/strictdoc_25_design.html
 RUN: %check_exists --file "%T/html/strictdoc/docs/strictdoc_25_design-TABLE.html"
 RUN: %check_exists --file "%T/html/strictdoc/docs/strictdoc_25_design-TRACE.html"
 RUN: %check_exists --file "%T/html/strictdoc/docs/strictdoc_25_design-DEEP-TRACE.html"
-
-RUN: %check_exists --file %T/html/strictdoc/docs/strictdoc_30_credits.html
-RUN: %check_exists --file "%T/html/strictdoc/docs/strictdoc_30_credits-TABLE.html"
-RUN: %check_exists --file "%T/html/strictdoc/docs/strictdoc_30_credits-TRACE.html"
-RUN: %check_exists --file "%T/html/strictdoc/docs/strictdoc_30_credits-DEEP-TRACE.html"
 
 # Naive way to check that the server-related links are not enabled in the static export.
 RUN: %cat "%T/html/index.html" | filecheck %s --check-prefix=CHECK-TREE

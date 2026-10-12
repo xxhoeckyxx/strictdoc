@@ -1,0 +1,72 @@
+{% extends "components/modal/form.jinja" %}
+{% set form = "sdoc_modal_form" %}
+{% block modal__context %}{% endblock modal__context %}
+{% block modal_form__header %}
+Add new document
+{% endblock modal_form__header %}
+{% block modal_form__content %}
+  <form
+    id="{{ form }}"  {# defined in the parent template #}
+    action="/actions/project_index/create_document"
+    method="POST"
+    data-turbo="true"
+  >
+    <sdoc-form-grid>
+      <sdoc-form-row>
+        <sdoc-form-row-aside></sdoc-form-row-aside>
+        <sdoc-form-row-main>
+          {%- with
+            field_class_name=none,
+            field_editable=true,
+            field_input_name="document_title",
+            field_label="document title",
+            field_placeholder="Enter document title here...",
+            field_type="singleline",
+            field_value=document_title,
+            testid_postfix="document_title",
+            errors=error_object.get_errors("document_title")
+          -%}
+            {%- include "components/form/field/contenteditable/index.jinja" %}
+          {%- endwith -%}
+        </sdoc-form-row-main>
+        <sdoc-form-row-aside></sdoc-form-row-aside>
+      </sdoc-form-row>
+
+      <sdoc-form-row>
+        <sdoc-form-row-aside></sdoc-form-row-aside>
+        <sdoc-form-row-main>
+          {%- with
+            field_class_name="std-input-document_path",
+            field_editable=true,
+            field_input_name="document_path",
+            field_label="document path and filename",
+            field_placeholder="Enter document path and filename here...",
+            field_type="singleline",
+            field_value=document_path,
+            testid_postfix="document_path",
+            errors=error_object.get_errors("document_path")
+          -%}
+            {%- include "components/form/field/contenteditable/index.jinja" %}
+          {%- endwith -%}
+          {%- if include_doc_paths -%}
+          <sdoc-form-hint>
+            ☞ Path must start with one of:
+            {% for path in include_doc_paths -%}
+              <code>{{ path }}</code>{% if not loop.last %}, {% endif %}
+            {%- endfor -%}
+          </sdoc-form-hint>
+          {%- endif -%}
+          {%- if editable_document_extensions -%}
+          <sdoc-form-hint>
+            ☞ File name must end with one of:
+            {% for extension in editable_document_extensions -%}
+              <code>{{ extension }}</code>{% if not loop.last %}, {% endif %}
+            {%- endfor -%}
+          </sdoc-form-hint>
+          {%- endif -%}
+        </sdoc-form-row-main>
+        <sdoc-form-row-aside></sdoc-form-row-aside>
+      </sdoc-form-row>
+    </sdoc-form-grid>
+  </form>
+{% endblock modal_form__content %}

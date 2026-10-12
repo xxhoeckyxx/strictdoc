@@ -1,0 +1,10 @@
+#
+# @relation(SDOC-SRS-72, scope=file)
+#
+
+# FIXME: Make config available as --config.
+RUN: cp %S/strictdoc_config.py %T/../
+
+RUN: %strictdoc export --formats=reqif-sdoc %S --output-dir %T
+RUN: %strictdoc convert %T/reqif/output.reqif %T/
+RUN: %diff %S/sample.sdoc %T/sample.sdoc

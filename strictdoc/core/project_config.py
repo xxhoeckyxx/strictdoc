@@ -3,6 +3,7 @@
 """
 
 import datetime
+import mimetypes
 import os
 import re
 import tempfile
@@ -10,19 +11,31 @@ import types
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import toml
 
 from strictdoc import __version__, environment
 from strictdoc.backend.reqif.sdoc_reqif_fields import ReqIFProfile
 from strictdoc.backend.sdoc.constants import SDocMarkup
+from strictdoc.commands.convert_config import ConvertCommandConfig
 from strictdoc.commands.export_config import ExportCommandConfig
-from strictdoc.commands.import_excel_config import ImportExcelCommandConfig
-from strictdoc.commands.import_reqif_config import ImportReqIFCommandConfig
+from strictdoc.commands.format_config import FormatCommandConfig
+from strictdoc.commands.manage_assets_config import ManageAssetsCommandConfig
 from strictdoc.commands.manage_autouid_config import ManageAutoUIDCommandConfig
+from strictdoc.commands.manage_new_config import ManageNewCommandConfig
 from strictdoc.commands.server_config import ServerCommandConfig
 from strictdoc.core.environment import SDocRuntimeEnvironment
+from strictdoc.core.feature import Feature
 from strictdoc.core.plugin import StrictDocPlugin
 from strictdoc.helpers.auto_described import auto_described
 from strictdoc.helpers.deprecation_engine import DEPRECATION_ENGINE
@@ -32,6 +45,37 @@ from strictdoc.helpers.md5 import get_md5
 from strictdoc.helpers.module import import_from_path
 from strictdoc.helpers.net import is_valid_host
 from strictdoc.helpers.path_filter import validate_mask
+
+if TYPE_CHECKING:
+    from strictdoc.backend.sdoc.models.document import SDocDocument
+    from strictdoc.backend.sdoc.models.grammar_element import GrammarElement
+    from strictdoc.backend.sdoc.models.node import SDocNode
+    from strictdoc.core.format import Format
+    from strictdoc.core.traceability_index import TraceabilityIndex
+
+CustomNodePrefixFunction = Callable[
+    [
+        Union["SDocNode", "SDocDocument"],
+        "GrammarElement",
+        "SDocDocument",
+        "TraceabilityIndex",
+        "ProjectConfig",
+    ],
+    Optional[str],
+]
+
+CustomNodeUidFunction = Callable[
+    [
+        str,
+        int,
+        Union["SDocNode", "SDocDocument"],
+        "GrammarElement",
+        "SDocDocument",
+        "TraceabilityIndex",
+        "ProjectConfig",
+    ],
+    Optional[str],
+]
 
 
 def parse_relation_tuple(column_name: str) -> Optional[Tuple[str, str]]:
@@ -72,7 +116,6 @@ class ProjectFeature(str, Enum):
     SOURCE_FILE_LANGUAGE_PARSERS = "SOURCE_FILE_LANGUAGE_PARSERS"
 
     MERMAID = "MERMAID"
-    RAPIDOC = "RAPIDOC"
     NESTOR = "NESTOR"
 
     ALL_FEATURES = "ALL_FEATURES"
@@ -93,13 +136,26 @@ class ProjectConfigDefault:
         ProjectFeature.TRACEABILITY_SCREEN,
         ProjectFeature.DEEP_TRACEABILITY_SCREEN,
         ProjectFeature.SEARCH,
-        ProjectFeature.HTML2PDF,
     ]
     DEFAULT_SERVER_HOST = "127.0.0.1"
     DEFAULT_SERVER_PORT = 5111
+    DEFAULT_LAZY_DOCUMENT_LOADING_THRESHOLD = 200
     DEFAULT_BUNDLE_DOCUMENT_VERSION = "@GIT_VERSION (Git branch: @GIT_BRANCH)"
     DEFAULT_BUNDLE_DOCUMENT_COMMIT_DATE = "@GIT_COMMIT_DATETIME"
     DEFAULT_SECTION_BEHAVIOR = "[SECTION]"
+
+
+def resolve_favicon_variant(
+    environment: SDocRuntimeEnvironment, is_running_on_server: bool
+) -> str:
+    """Resolve which favicon.svg.jinja variant identifies this process."""
+    if environment.is_test_env:
+        return "test"
+    if environment.is_development_mode:
+        return "dev"
+    if not is_running_on_server:
+        return "export"
+    return "default"
 
 
 @auto_described
@@ -110,12 +166,16 @@ class ProjectConfig:
 
     def __init__(
         self,
+        *,
         project_title: str = ProjectConfigDefault.DEFAULT_PROJECT_TITLE,
         dir_for_sdoc_assets: str = ProjectConfigDefault.DEFAULT_DIR_FOR_SDOC_ASSETS,
         dir_for_sdoc_cache: str = ProjectConfigDefault.DEFAULT_DIR_FOR_SDOC_CACHE,
-        project_features: Optional[List[str]] = None,
+        project_features: Optional[List[Union[str, Feature]]] = None,
         server_host: str = ProjectConfigDefault.DEFAULT_SERVER_HOST,
         server_port: int = ProjectConfigDefault.DEFAULT_SERVER_PORT,
+        lazy_document_loading_threshold: int = (
+            ProjectConfigDefault.DEFAULT_LAZY_DOCUMENT_LOADING_THRESHOLD
+        ),
         input_paths: Optional[List[str]] = None,
         include_doc_paths: Optional[List[str]] = None,
         exclude_doc_paths: Optional[List[str]] = None,
@@ -128,6 +188,7 @@ class ProjectConfig:
         html2pdf_strict: bool = False,
         html2pdf_template: Optional[str] = None,
         html2pdf_forced_page_break_nodes: Optional[List[str]] = None,
+        html2pdf_disable_ssl_check: bool = False,
         bundle_document_uid: Optional[str] = None,
         bundle_document_version: Optional[
             str
@@ -147,12 +208,30 @@ class ProjectConfig:
         diff_git_revisions: Optional[str] = None,
         diff_dir_revisions: Optional[Tuple[str, str]] = None,
         chromedriver: Optional[str] = None,
+        chrome_binary: Optional[str] = None,
         # FIXME: The section_behavior field will be removed by the end of 2025-Q4.
         section_behavior: Optional[
             str
         ] = ProjectConfigDefault.DEFAULT_SECTION_BEHAVIOR,
         statistics_generator: Optional[str] = None,
+        document_line_width: Optional[int] = None,
+        # Logo path can be set in the project config to customize the launcher's appearance for a specific project.
+        launcher_logo_path: Optional[str] = None,
+        # Favicon path can be set in the project config to customize the
+        # browser-tab favicon. Applies in every mode, including the
+        # dev/test server, overriding the built-in favicon there too.
+        favicon_path: Optional[str] = None,
+        # Custom CSS path can be set in the project config to extend or
+        # override StrictDoc's default stylesheets in the HTML export and
+        # on the server.
+        custom_css_path: Optional[str] = None,
         user_plugin: Optional[StrictDocPlugin] = None,
+        # Optional custom Python function for defining a node's UID prefix.
+        custom_node_prefix_function: Optional[CustomNodePrefixFunction] = None,
+        # Optional custom Python function for composing a node's full UID
+        # from its resolved prefix and next available number.
+        custom_node_uid_function: Optional[CustomNodeUidFunction] = None,
+        formats: Optional[List["Format"]] = None,
         # Reserved for StrictDoc's internal use.
         _config_last_update: Optional[datetime.datetime] = None,
     ) -> None:
@@ -185,27 +264,34 @@ class ProjectConfig:
         #
         # project_features
         #
-        project_features = (
+        project_features_: List[Union[str, Feature]] = (
             project_features
             if project_features is not None
-            else ProjectConfigDefault.DEFAULT_FEATURES
+            else list(ProjectConfigDefault.DEFAULT_FEATURES)
         )
 
-        assert isinstance(project_features, list), (
+        assert isinstance(project_features_, list), (
             f"config: project_features: parameter must be an "
-            f"array: '{project_features}'."
+            f"array: '{project_features_}'."
         )
 
-        for feature in project_features:
+        for feature in project_features_:
+            if isinstance(feature, Feature):
+                continue
             assert feature in ProjectFeature.all(), (
                 f"config: project_features: unknown feature declared: "
                 f"'{feature}'."
             )
 
-        if ProjectFeature.ALL_FEATURES in project_features:
-            project_features = ProjectFeature.all()
+        if ProjectFeature.ALL_FEATURES in project_features_:
+            custom_features = [
+                feature
+                for feature in project_features_
+                if isinstance(feature, Feature)
+            ]
+            project_features_ = [*ProjectFeature.all(), *custom_features]
 
-        self.project_features: List[str] = project_features
+        self.project_features: List[Union[str, Feature]] = project_features_
 
         #
         # server_host and server_port
@@ -219,6 +305,24 @@ class ProjectConfig:
             f"strictdoc.toml: 'port': invalid port: {server_port}'."
         )
         self.server_port: int = server_port
+
+        #
+        # lazy_document_loading_threshold
+        # Applies only to the document screen. Documents with more content
+        # nodes than this are rendered in lazily loaded chunks on the
+        # server instead of all at once. A value of 0 disables the chunked
+        # rendering of documents.
+        #
+        assert (
+            isinstance(lazy_document_loading_threshold, int)
+            and lazy_document_loading_threshold >= 0
+        ), (
+            "config: lazy_document_loading_threshold: must be a non-negative "
+            f"integer: {lazy_document_loading_threshold}."
+        )
+        self.lazy_document_loading_threshold: int = (
+            lazy_document_loading_threshold
+        )
 
         #
         # input_paths
@@ -308,6 +412,9 @@ class ProjectConfig:
             self.output_dir, "html"
         )
         self.export_formats: Optional[List[str]] = None
+        self.formats: List[Format] = (
+            formats if formats is not None else ProjectConfig.default_formats()
+        )
         self.export_included_documents: bool = False
         self.generate_bundle_document: bool = False
         self.filter_nodes: Optional[str] = None
@@ -328,6 +435,11 @@ class ProjectConfig:
         self.html2pdf_forced_page_break_nodes: List[str] = (
             html2pdf_forced_page_break_nodes or []
         )
+        assert isinstance(html2pdf_disable_ssl_check, bool), (
+            "config: html2pdf_disable_ssl_check: "
+            f"must be a True/False value: {html2pdf_disable_ssl_check}."
+        )
+        self.html2pdf_disable_ssl_check: bool = html2pdf_disable_ssl_check
 
         self.bundle_document_uid: Optional[str] = bundle_document_uid
         self.bundle_document_version: Optional[str] = bundle_document_version
@@ -377,27 +489,220 @@ class ProjectConfig:
 
         self.diff_git_revisions: Optional[str] = diff_git_revisions
         self.diff_dir_revisions: Optional[Tuple[str, str]] = diff_dir_revisions
+        self.diff_page = False
 
         self.chromedriver: Optional[str] = chromedriver
+        self.chrome_binary: Optional[str] = chrome_binary
         self.section_behavior: Optional[str] = section_behavior
 
         self.statistics_generator: Optional[str] = statistics_generator
+
+        if document_line_width is not None:
+            assert isinstance(document_line_width, int), document_line_width
+            assert document_line_width >= 80, (
+                f"config: document_line_width: minimum acceptable value is 80, "
+                f"got: {document_line_width}."
+            )
+        self.document_line_width: Optional[int] = document_line_width
+
         self.user_plugin: Optional[StrictDocPlugin] = user_plugin
+
+        self.custom_node_prefix_function: Optional[CustomNodePrefixFunction] = (
+            custom_node_prefix_function
+        )
+
+        self.custom_node_uid_function: Optional[CustomNodeUidFunction] = (
+            custom_node_uid_function
+        )
+
+        # Optional launcher logo path (absolute or workspace-relative).
+        self.launcher_logo_path: Optional[str] = launcher_logo_path
+
+        # Optional custom favicon path, project-relative. Validated and
+        # resolved to an absolute path in validate_and_finalize().
+        self.favicon_path: Optional[str] = favicon_path
+
+        # Optional custom CSS path, project-relative. Validated and
+        # resolved to an absolute path in validate_and_finalize().
+        self.custom_css_path: Optional[str] = custom_css_path
 
         self.config_last_update: Optional[datetime.datetime] = (
             _config_last_update
         )
         self.is_running_on_server: bool = False
+        self.watch_enabled: bool = False
 
     @staticmethod
     def default_config() -> "ProjectConfig":
         return ProjectConfig()
+
+    def resolve_custom_node_prefix(
+        self,
+        node: Union["SDocNode", "SDocDocument"],
+        grammar_element: "GrammarElement",
+        document: "SDocDocument",
+        traceability_index: "TraceabilityIndex",
+    ) -> Optional[str]:
+        """
+        @relation(SDOC-LLR-209, scope=function)
+        """
+        if self.custom_node_prefix_function is None:
+            return None
+        return self.custom_node_prefix_function(
+            node, grammar_element, document, traceability_index, self
+        )
+
+    def resolve_custom_node_uid(
+        self,
+        prefix: str,
+        next_number: int,
+        *,
+        node: Union["SDocNode", "SDocDocument"],
+        grammar_element: "GrammarElement",
+        document: "SDocDocument",
+        traceability_index: "TraceabilityIndex",
+    ) -> Optional[str]:
+        """
+        @relation(SDOC-LLR-210, scope=function)
+        """
+        if self.custom_node_uid_function is None:
+            return None
+        return self.custom_node_uid_function(
+            prefix,
+            next_number,
+            node,
+            grammar_element,
+            document,
+            traceability_index,
+            self,
+        )
+
+    @staticmethod
+    def default_formats() -> List["Format"]:
+        # Imported locally to avoid a circular import: each Format module
+        # imports generator/writer classes that, transitively, import
+        # ProjectConfig itself.
+        from strictdoc.backend.excel.export.excel_format import (  # noqa: PLC0415
+            ExcelFormat,
+        )
+        from strictdoc.backend.gcov.gcov_format import (  # noqa: PLC0415
+            GCovJSONFormat,
+        )
+        from strictdoc.backend.json.json_format import (  # noqa: PLC0415
+            JSONFormat,
+        )
+        from strictdoc.backend.markdown.markdown_format import (  # noqa: PLC0415
+            MarkdownFormat,
+        )
+        from strictdoc.backend.reqif.reqif_format import (  # noqa: PLC0415
+            ReqIFFormat,
+        )
+        from strictdoc.backend.rst.rst_format import (  # noqa: PLC0415
+            RSTFormat,
+        )
+        from strictdoc.backend.sdoc.sdoc_format import (  # noqa: PLC0415
+            SDocFormat,
+        )
+        from strictdoc.backend.sdoc_source_code.test_reports.junit_xml_format import (  # noqa: PLC0415
+            JUnitXMLFormat,
+        )
+        from strictdoc.backend.sdoc_source_code.test_reports.robot_xml_format import (  # noqa: PLC0415
+            RobotXMLFormat,
+        )
+        from strictdoc.backend.spdx.spdx_format import (  # noqa: PLC0415
+            SPDXFormat,
+        )
+        from strictdoc.export.html.html_format import (  # noqa: PLC0415
+            HTMLFormat,
+        )
+        from strictdoc.features.doxygen.doxygen_format import (  # noqa: PLC0415
+            DoxygenFormat,
+        )
+        from strictdoc.features.html2pdf.html2pdf_format import (  # noqa: PLC0415
+            HTML2PDFFormat,
+        )
+
+        return [
+            HTMLFormat(),
+            HTML2PDFFormat(),
+            RSTFormat(),
+            ExcelFormat(),
+            ReqIFFormat(),
+            SDocFormat(),
+            MarkdownFormat(),
+            DoxygenFormat(),
+            SPDXFormat(),
+            JUnitXMLFormat(),
+            GCovJSONFormat(),
+            RobotXMLFormat(),
+            JSONFormat(),
+        ]
+
+    @staticmethod
+    def _builtin_features_by_handle() -> Dict[str, Feature]:
+        # Imported locally to avoid a circular import, mirroring
+        # default_formats() above.
+        from strictdoc.features.project_statistics.feature import (  # noqa: PLC0415
+            ProjectStatisticsFeature,
+        )
+        from strictdoc.features.tree_map.feature import (  # noqa: PLC0415
+            TreeMapFeature,
+        )
+
+        return {
+            feature.HANDLE: feature
+            for feature in [
+                ProjectStatisticsFeature(),
+                TreeMapFeature(),
+            ]
+        }
+
+    def get_features(self) -> List[Feature]:
+        """
+        Resolve self.project_features (a mix of built-in string handles and
+        directly-registered Feature instances) into concrete Feature
+        instances. A string handle that isn't backed by a built-in Feature
+        yet (i.e. most ProjectFeature enum members, which have not been
+        migrated to the Feature abstraction) resolves to nothing here.
+        """
+        builtin_features_by_handle = ProjectConfig._builtin_features_by_handle()
+        resolved_features: List[Feature] = []
+        for feature in self.project_features:
+            if isinstance(feature, Feature):
+                resolved_features.append(feature)
+            elif feature in builtin_features_by_handle:
+                resolved_features.append(builtin_features_by_handle[feature])
+        return resolved_features
+
+    def get_feature(self, handle: str) -> Optional[Feature]:
+        for feature in self.get_features():
+            if feature.HANDLE == handle:
+                return feature
+        return None
+
+    def get_editable_document_extensions(self) -> List[str]:
+        """
+        File extensions a new/edited document may use, i.e. the union of
+        supported_extensions() from every format in self.formats that
+        supports_edit(). Computed live from self.formats so that adding or
+        removing a format changes the accepted extensions without any
+        further code changes.
+        """
+        extensions: List[str] = []
+        for format_ in self.formats:
+            if not format_.supports_edit():
+                continue
+            for extension in format_.supported_extensions():
+                if extension not in extensions:
+                    extensions.append(extension)
+        return extensions
 
     # Some server command settings can override the project config settings.
     def integrate_server_config(
         self, server_config: ServerCommandConfig
     ) -> None:
         self.is_running_on_server = True
+        self.watch_enabled = server_config.watch
         if (server_host_ := server_config.host) is not None:
             self.server_host = server_host_
         if (server_port_ := server_config.port) is not None:
@@ -481,10 +786,17 @@ class ProjectConfig:
         if ProjectFeature.DIFF in self.project_features:
             if export_config.generate_diff_git is not None:
                 self.diff_git_revisions = export_config.generate_diff_git
+                self.diff_page = True
             if export_config.generate_diff_dirs is not None:
                 self.diff_dir_revisions = export_config.generate_diff_dirs
+                self.diff_page = True
 
         self.chromedriver = export_config.chromedriver
+        self.chrome_binary = export_config.chrome_binary
+        # If enabled in project config, keep it enabled unless explicitly
+        # requested via CLI (which can only enable it as well).
+        if export_config.disable_ssl_check:
+            self.html2pdf_disable_ssl_check = True
 
         if (
             export_config.enable_mathjax
@@ -526,6 +838,24 @@ class ProjectConfig:
                 "It can be safely removed from the project configuration."
             )
 
+        if ProjectFeature.MATHJAX in self.project_features:
+            DEPRECATION_ENGINE.add_message(
+                "MATHJAX_feature_deprecated",
+                "The MATHJAX feature is now enabled by default and no longer "
+                "needs to be listed in the project configuration. "
+                "Please remove it from the project_features list in your "
+                "strictdoc_config.py file.",
+            )
+
+        if ProjectFeature.MERMAID in self.project_features:
+            DEPRECATION_ENGINE.add_message(
+                "MERMAID_feature_deprecated",
+                "The MERMAID feature is now enabled by default and no longer "
+                "needs to be listed in the project configuration. "
+                "Please remove it from the project_features list in your "
+                "strictdoc_config.py file.",
+            )
+
         #
         # Validate HTML2PDF template path.
         #
@@ -542,6 +872,34 @@ class ProjectConfig:
                 )
 
         #
+        # Validate favicon path.
+        #
+        if (favicon_path := self.favicon_path) is not None:
+            assert not os.path.isabs(favicon_path)
+            if project_path is not None:
+                favicon_path = os.path.join(project_path, favicon_path)
+            if not os.path.isfile(favicon_path):
+                raise ValueError(
+                    "config: favicon_path: "
+                    f"invalid path to a favicon file: {favicon_path}."
+                )
+            self.favicon_path = favicon_path
+
+        #
+        # Validate custom CSS path.
+        #
+        if (custom_css_path := self.custom_css_path) is not None:
+            assert not os.path.isabs(custom_css_path)
+            if project_path is not None:
+                custom_css_path = os.path.join(project_path, custom_css_path)
+            if not os.path.isfile(custom_css_path):
+                raise ValueError(
+                    "config: custom_css_path: "
+                    f"invalid path to a CSS file: {custom_css_path}."
+                )
+            self.custom_css_path = custom_css_path
+
+        #
         # Validate path to Chrome Driver.
         #
         if (
@@ -549,6 +907,16 @@ class ProjectConfig:
         ) is not None and not os.path.isfile(chromedriver):
             raise ValueError(
                 f"config: chromedriver: not found at path: {chromedriver}."
+            )
+
+        #
+        # Validate path to Chrome binary.
+        #
+        if (
+            chrome_binary := self.chrome_binary
+        ) is not None and not os.path.isfile(chrome_binary):
+            raise ValueError(
+                f"config: chrome_binary: not found at path: {chrome_binary}."
             )
 
         #
@@ -615,6 +983,34 @@ class ProjectConfig:
     def is_feature_activated(self, feature: ProjectFeature) -> bool:
         return feature in self.project_features
 
+    def get_favicon_variant(self) -> str:
+        return resolve_favicon_variant(
+            self.environment, self.is_running_on_server
+        )
+
+    def get_custom_favicon_path(self) -> Optional[str]:
+        return self.favicon_path
+
+    def get_favicon_filename(self) -> str:
+        custom_favicon_path = self.get_custom_favicon_path()
+        if custom_favicon_path is None:
+            return "favicon.svg"
+        return "favicon" + os.path.splitext(custom_favicon_path)[1]
+
+    def get_favicon_mime_type(self) -> str:
+        custom_favicon_path = self.get_custom_favicon_path()
+        if custom_favicon_path is None:
+            return "image/svg+xml"
+        mime_type, _ = mimetypes.guess_type(custom_favicon_path)
+        return mime_type or "application/octet-stream"
+
+    def get_custom_css_filename(self) -> str:
+        # The fixed name under which the custom CSS file (custom_css_path)
+        # is copied to the static assets output directory and linked from
+        # base.jinja.html. A fixed name avoids collisions with StrictDoc's
+        # own stylesheets.
+        return "custom.css"
+
     def is_activated_table_screen(self) -> bool:
         return ProjectFeature.TABLE_SCREEN in self.project_features
 
@@ -625,7 +1021,10 @@ class ProjectConfig:
         return ProjectFeature.DEEP_TRACEABILITY_SCREEN in self.project_features
 
     def is_activated_project_statistics(self) -> bool:
-        return ProjectFeature.PROJECT_STATISTICS_SCREEN in self.project_features
+        return (
+            self.get_feature(ProjectFeature.PROJECT_STATISTICS_SCREEN)
+            is not None
+        )
 
     def is_activated_requirements_to_source_traceability(self) -> bool:
         return (
@@ -637,9 +1036,6 @@ class ProjectConfig:
         return (
             ProjectFeature.TRACEABILITY_MATRIX_SCREEN in self.project_features
         )
-
-    def is_activated_tree_map(self) -> bool:
-        return ProjectFeature.TREE_MAP_SCREEN in self.project_features
 
     def is_activated_search(self) -> bool:
         return (
@@ -657,13 +1053,22 @@ class ProjectConfig:
         return ProjectFeature.REQIF in self.project_features
 
     def is_activated_mathjax(self) -> bool:
-        return ProjectFeature.MATHJAX in self.project_features
+        # FIXME: Refactor Jinja templates to not rely on the MathJax feature
+        # flag, since MathJax is now a stable feature that is always included in
+        # the static assets.
+        return True
 
     def is_activated_mermaid(self) -> bool:
-        return ProjectFeature.MERMAID in self.project_features
+        # FIXME: Refactor Jinja templates to not rely on the Mermaid feature
+        # flag, since Mermaid is now a stable feature that is always included
+        # in the static assets.
+        return True
 
-    def is_activated_rapidoc(self) -> bool:
-        return ProjectFeature.RAPIDOC in self.project_features
+    def is_activated_plantuml(self) -> bool:
+        # FIXME: Refactor Jinja templates to not rely on the PlantUML feature
+        # flag, since PlantUML is now a stable feature that is always
+        # included in the static assets.
+        return True
 
     def get_project_root_path(self) -> str:
         if self.input_paths is not None and len(self.input_paths) > 0:
@@ -676,11 +1081,8 @@ class ProjectConfig:
     def get_path_to_cache_dir(self) -> str:
         return self.dir_for_sdoc_cache
 
-    def get_static_files_path(self) -> str:
-        return self.environment.get_static_files_path()
-
-    def get_extra_static_files_path(self) -> str:
-        return self.environment.get_extra_static_files_path()
+    def get_static_files_paths(self) -> List[str]:
+        return self.environment.get_static_files_paths()
 
     def get_project_hash(self) -> str:
         assert self.input_paths is not None and len(self.input_paths) > 0
@@ -767,28 +1169,15 @@ class ProjectConfigLoader:
         return project_config
 
     @classmethod
-    def load_using_import_excel_config(
+    def load_using_convert_config(
         cls,
-        _: ImportExcelCommandConfig,
+        convert_config: ConvertCommandConfig,
     ) -> ProjectConfig:
-        path_to_config = os.getcwd()
+        path_to_config = convert_config.get_path_to_config()
         project_config: ProjectConfig = cls.load_from_path_or_get_default(
             path_to_config=path_to_config
         )
-        project_config.input_paths = [path_to_config]
-        project_config.validate_and_finalize()
-        return project_config
-
-    @classmethod
-    def load_using_import_reqif_config(
-        cls,
-        _: ImportReqIFCommandConfig,
-    ) -> ProjectConfig:
-        path_to_config = os.getcwd()
-        project_config: ProjectConfig = cls.load_from_path_or_get_default(
-            path_to_config=path_to_config
-        )
-        project_config.input_paths = [path_to_config]
+        project_config.input_paths = [os.getcwd()]
         project_config.validate_and_finalize()
         return project_config
 
@@ -806,12 +1195,86 @@ class ProjectConfigLoader:
         # FIXME: Encapsulate all this in project_config.integrate_manage_autouid_config(),
         #        following the example of integrate_export_config().
         project_config.input_paths = [manage_autouid_config.input_path]
-        project_config.source_root_path = str(
-            Path(manage_autouid_config.input_path).resolve()
-        )
+        if project_config.source_root_path is None:
+            project_config.source_root_path = str(
+                Path(manage_autouid_config.input_path).resolve()
+            )
         project_config.auto_uid_mode = True
         project_config.autouuid_include_sections = (
             manage_autouid_config.include_sections
+        )
+
+        # FIXME: Traceability Index is coupled with HTML output.
+        project_config.export_output_html_root = "NOT_RELEVANT"
+
+        project_config.validate_and_finalize()
+
+        return project_config
+
+    @classmethod
+    def load_using_format_config(
+        cls,
+        format_config: FormatCommandConfig,
+    ) -> "ProjectConfig":
+        path_to_config = format_config.get_path_to_config()
+
+        project_config: ProjectConfig = cls.load_from_path_or_get_default(
+            path_to_config=path_to_config
+        )
+
+        project_config.input_paths = [format_config.input_path]
+        if project_config.source_root_path is None:
+            project_config.source_root_path = str(
+                Path(format_config.input_path).resolve()
+            )
+
+        # FIXME: Traceability Index is coupled with HTML output.
+        project_config.export_output_html_root = "NOT_RELEVANT"
+
+        project_config.validate_and_finalize()
+
+        return project_config
+
+    @classmethod
+    def load_using_manage_new_config(
+        cls,
+        manage_new_config: ManageNewCommandConfig,
+    ) -> "ProjectConfig":
+        path_to_config = manage_new_config.get_path_to_config()
+
+        project_config: ProjectConfig = cls.load_from_path_or_get_default(
+            path_to_config=path_to_config
+        )
+
+        project_config.input_paths = [manage_new_config.project_root_path]
+        if project_config.source_root_path is None:
+            project_config.source_root_path = str(
+                Path(manage_new_config.project_root_path).resolve()
+            )
+
+        # FIXME: Traceability Index is coupled with HTML output.
+        project_config.export_output_html_root = "NOT_RELEVANT"
+
+        project_config.validate_and_finalize()
+
+        return project_config
+
+    @classmethod
+    def load_using_manage_assets_config(
+        cls,
+        manage_assets_config: ManageAssetsCommandConfig,
+    ) -> ProjectConfig:
+        path_to_config = manage_assets_config.get_path_to_config()
+
+        project_config: ProjectConfig = cls.load_from_path_or_get_default(
+            path_to_config=path_to_config
+        )
+
+        # FIXME: Encapsulate all this in project_config.integrate_manage_assets_config(),
+        #        following the example of integrate_export_config().
+        project_config.input_paths = [manage_assets_config.input_path]
+        project_config.source_root_path = str(
+            Path(manage_assets_config.input_path).resolve()
         )
 
         # FIXME: Traceability Index is coupled with HTML output.
@@ -846,7 +1309,7 @@ class ProjectConfigLoader:
         if not os.path.isfile(path_to_config):
             return ProjectConfig.default_config()
 
-        if path_to_config.endswith("strictdoc_config.py"):
+        if path_to_config.endswith(".py"):
             return ProjectConfigLoader.load_from_python(
                 config_py_path=path_to_config
             )
@@ -887,6 +1350,9 @@ class ProjectConfigLoader:
         )
         project_config = create_config_function()
         assert isinstance(project_config, ProjectConfig)
+        project_config.config_last_update = get_file_modification_time(
+            config_py_path
+        )
         return project_config
 
     @staticmethod
@@ -898,9 +1364,14 @@ class ProjectConfigLoader:
         project_title = ProjectConfigDefault.DEFAULT_PROJECT_TITLE
         dir_for_sdoc_assets = ProjectConfigDefault.DEFAULT_DIR_FOR_SDOC_ASSETS
         dir_for_sdoc_cache = ProjectConfigDefault.DEFAULT_DIR_FOR_SDOC_CACHE
-        project_features = ProjectConfigDefault.DEFAULT_FEATURES
+        project_features: List[Union[str, Feature]] = list(
+            ProjectConfigDefault.DEFAULT_FEATURES
+        )
         server_host = ProjectConfigDefault.DEFAULT_SERVER_HOST
         server_port = ProjectConfigDefault.DEFAULT_SERVER_PORT
+        lazy_document_loading_threshold = (
+            ProjectConfigDefault.DEFAULT_LAZY_DOCUMENT_LOADING_THRESHOLD
+        )
         include_doc_paths: List[str] = []
         exclude_doc_paths: List[str] = []
         source_root_path = None
@@ -910,6 +1381,7 @@ class ProjectConfigLoader:
         source_nodes: List[SourceNodesEntry] = []
         html2pdf_strict: bool = False
         html2pdf_template: Optional[str] = None
+        custom_css_path: Optional[str] = None
         bundle_document_version = (
             ProjectConfigDefault.DEFAULT_BUNDLE_DOCUMENT_VERSION
         )
@@ -925,9 +1397,12 @@ class ProjectConfigLoader:
         reqif_enable_mid = False
         reqif_import_markup: Optional[str] = None
         chromedriver: Optional[str] = None
+        chrome_binary: Optional[str] = None
+        html2pdf_disable_ssl_check: bool = False
 
         section_behavior: str = ProjectConfigDefault.DEFAULT_SECTION_BEHAVIOR
         statistics_generator: Optional[str] = None
+        document_line_width: Optional[int] = None
 
         if "project" in config_dict:
             project_content = config_dict["project"]
@@ -973,6 +1448,10 @@ class ProjectConfigLoader:
                 "html2pdf_template", html2pdf_template
             )
 
+            custom_css_path = project_content.get(
+                "custom_css_path", custom_css_path
+            )
+
             bundle_document_version = project_content.get(
                 "bundle_document_version", bundle_document_version
             )
@@ -1002,6 +1481,12 @@ class ProjectConfigLoader:
 
             chromedriver = project_content.get("chromedriver", chromedriver)
 
+            chrome_binary = project_content.get("chrome_binary", chrome_binary)
+
+            html2pdf_disable_ssl_check = project_content.get(
+                "html2pdf_disable_ssl_check", html2pdf_disable_ssl_check
+            )
+
             if (
                 test_report_root_dict_ := project_content.get(
                     "test_report_root_dict", None
@@ -1018,6 +1503,10 @@ class ProjectConfigLoader:
                 "section_behavior", section_behavior
             )
             assert section_behavior in ("[SECTION]", "[[SECTION]]")
+
+            document_line_width = project_content.get(
+                "document_line_width", document_line_width
+            )
 
             if "source_nodes" in project_content:
                 source_nodes_config = project_content["source_nodes"]
@@ -1040,6 +1529,10 @@ class ProjectConfigLoader:
             server_content = config_dict["server"]
             server_host = server_content.get("host", server_host)
             server_port = server_content.get("port", server_port)
+            lazy_document_loading_threshold = server_content.get(
+                "lazy_document_loading_threshold",
+                lazy_document_loading_threshold,
+            )
 
         if "reqif" in config_dict:
             reqif_content = config_dict["reqif"]
@@ -1056,6 +1549,7 @@ class ProjectConfigLoader:
             project_features=project_features,
             server_host=server_host,
             server_port=server_port,
+            lazy_document_loading_threshold=lazy_document_loading_threshold,
             include_doc_paths=include_doc_paths,
             exclude_doc_paths=exclude_doc_paths,
             source_root_path=source_root_path,
@@ -1065,6 +1559,7 @@ class ProjectConfigLoader:
             source_nodes=source_nodes,
             html2pdf_strict=html2pdf_strict,
             html2pdf_template=html2pdf_template,
+            custom_css_path=custom_css_path,
             bundle_document_version=bundle_document_version,
             bundle_document_date=bundle_document_date,
             traceability_matrix_relation_columns=traceability_matrix_relation_columns,
@@ -1073,7 +1568,10 @@ class ProjectConfigLoader:
             reqif_enable_mid=reqif_enable_mid,
             reqif_import_markup=reqif_import_markup,
             chromedriver=chromedriver,
+            chrome_binary=chrome_binary,
+            html2pdf_disable_ssl_check=html2pdf_disable_ssl_check,
             section_behavior=section_behavior,
             statistics_generator=statistics_generator,
+            document_line_width=document_line_width,
             _config_last_update=config_last_update,
         )
